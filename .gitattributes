@@ -1,0 +1,40 @@
+# BoardQuest — line-ending policy
+#
+# Backend (Render) and CI run on Linux: text files must be LF in the
+# repository and in every checkout. This file makes that true regardless of
+# each developer's local core.autocrlf setting (no per-machine config needed).
+#
+#   text=auto  -> Git normalizes text files to LF on commit
+#   eol=lf     -> Git checks text files out with LF (even on Windows)
+
+* text=auto eol=lf
+
+# --- Windows-only scripts keep CRLF (cmd.exe batch files require it) --------
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# --- Binary assets: never normalize (future-proofing) -----------------------
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.avif binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.glb binary
+*.gltf binary
+*.mp3 binary
+*.mp4 binary
+*.webm binary
+*.wav binary
+*.zip binary
+*.gz binary
+*.wasm binary
+*.exe binary
+*.dll binary
