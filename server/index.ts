@@ -1,15 +1,23 @@
 /**
  * BoardQuest realtime server.
- * WebSocket endpoint: ws://host:8787/ws
+ *
+ *   GET /health   → lightweight JSON liveness probe (no auth, no secrets)
+ *   GET /         → simple JSON identity response
+ *   WS   /ws      → realtime game socket (the Vite dev proxy also forwards /boardquest-ws)
+ *
+ * One HTTP server hosts both the JSON routes and the WebSocket upgrade —
+ * there is intentionally no second port or second process.
  *
  * Handshake:
  *   client sends {t:'hello', name, playerId?} → server assigns or reconnects a player id
  *   then create/join; after that the server drives all game state.
  */
+import http from 'node:http'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { WebSocketServer } from 'ws'
 import type { WebSocket } from 'ws'
 import type { ClientMsg } from '../src/net/protocol'
-import { RoomManager, log } from './rooms'
+import { RoomManager, log, setManagerRef } from './rooms'
 
 // Deploy note (Render and similar hosts): this process must run on a host that
 // permits long-lived WebSocket connections. Render injects PORT automatically;
@@ -17,8 +25,57 @@ import { RoomManager, log } from './rooms'
 // VITE_WS_URL=wss://<this-host>/ws (see README "Deploy BoardQuest").
 const PORT = Number(process.env.PORT || 8787)
 const HOST = '0.0.0.0' // externally reachable on PaaS hosts; localhost-only would fail there
-// No `path` restriction: direct clients use /ws, the Vite dev proxy uses /boardquest-ws.
-const wss = new WebSocketServer({ host: HOST, port: PORT })
+
+/* --------------------------------- HTTP routes --------------------------------- */
+
+const JSON_HEADERS = {
+  'content-type': 'application/json; charset=utf-8',
+  'cache-control': 'no-store',
+}
+
+/** Health payload: deliberately minimal — no env vars, rooms, players or internals. */
+function healthPayload(): Record<string, unknown> {
+  return {
+    ok: true,
+    service: 'boardquest-server',
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+  }
+}
+
+function routeHttp(req: IncomingMessage, res: ServerResponse): void {
+  const path = (req.url ?? '/').split('?')[0]
+  if (req.method !== 'GET') {
+    res.writeHead(405, JSON_HEADERS)
+    res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }))
+    return
+  }
+  if (path === '/health') {
+    res.writeHead(200, JSON_HEADERS)
+    res.end(JSON.stringify(healthPayload()))
+    return
+  }
+  if (path === '/') {
+    res.writeHead(200, JSON_HEADERS)
+    res.end(JSON.stringify({ service: 'boardquest-server', status: 'running' }))
+    return
+  }
+  res.writeHead(404, JSON_HEADERS)
+  res.end(JSON.stringify({ ok: false, error: 'not_found' }))
+}
+
+/* ---------------------------------- servers ------------------------------------ */
+
+const wss = new WebSocketServer({ noServer: true })
+const server = http.createServer(routeHttp)
+
+// WebSocket upgrade: accept upgrades exactly as before (no path restriction —
+// direct clients use /ws, the Vite dev proxy forwards /boardquest-ws).
+server.on('upgrade', (req, socket, head) => {
+  wss.handleUpgrade(req, socket as never, head, (ws) => {
+    wss.emit('connection', ws, req)
+  })
+})
 
 interface Conn {
   ws: WebSocket
@@ -28,6 +85,11 @@ interface Conn {
 
 const connections = new Set<Conn>()
 const manager = new RoomManager()
+// Let engine timers (zombie-room teardown) close rooms through the manager.
+setManagerRef({
+  hasRoom: (code) => manager.hasRoom(code),
+  closeRoom: (code, reason) => manager.closeRoom(code, reason),
+})
 
 function send(conn: Conn, msg: unknown): void {
   if (conn.ws.readyState === 1) {
@@ -224,11 +286,13 @@ function handle(conn: Conn, msg: ClientMsg): void {
 }
 
 /* ---------------------------------- heartbeat ---------------------------------- */
-const INTERVAL = 30_000
-const heartbeatTimer = setInterval(() => {
+// Ping every INTERVAL; terminate connections that missed the previous pong.
+// BQ_HEARTBEAT_MS overrides the interval for tests (min 5s to avoid traffic abuse).
+const INTERVAL = Math.max(5_000, Number(process.env.BQ_HEARTBEAT_MS || 30_000))
+let heartbeatTimer: NodeJS.Timeout | null = setInterval(() => {
   for (const conn of connections) {
     if (!conn.alive) {
-      conn.ws.terminate()
+      conn.ws.terminate() // 'close' fires → connections.delete + manager.leave cleanup
       continue
     }
     conn.alive = false
@@ -236,21 +300,23 @@ const heartbeatTimer = setInterval(() => {
   }
 }, INTERVAL)
 
-wss.on('listening', () => {
-  const addr = wss.address()
-  const shownPort = typeof addr === 'object' && addr ? addr.port : PORT
-  log(`realtime server listening on ws://${HOST}:${shownPort}/ws`)
+server.listen(PORT, HOST, () => {
+  log(`realtime server listening on ws://${HOST}:${PORT}/ws`)
+  log(`health endpoint: http://${HOST}:${PORT}/health`)
   log(process.env.PORT ? `using PORT from environment (${PORT})` : 'PORT not set — dev default 8787')
   log('WebSocket path: /ws (the Vite dev proxy also forwards /boardquest-ws here)')
 })
 
 /* ------------------------------ graceful shutdown ------------------------------ */
-// Render and other PaaS send SIGTERM before stopping a service: close the listener,
-// terminate sockets promptly, and exit so the platform sees a clean shutdown.
+// Render and other PaaS send SIGTERM before stopping a service: clear the
+// heartbeat, close the listener, terminate sockets, exit cleanly.
 function shutdown(signal: string): void {
   log(`${signal} received — shutting down (rooms are in-memory and will be cleared)`)
-  clearInterval(heartbeatTimer)
-  wss.close(() => {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer)
+    heartbeatTimer = null
+  }
+  server.close(() => {
     log('server closed')
     process.exit(0)
   })

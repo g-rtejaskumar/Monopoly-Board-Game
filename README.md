@@ -93,6 +93,52 @@ BoardQuest is two deployable pieces:
 > functions — neither supports persistent WebSocket connections. Deploy the server
 > separately and point the frontend at it with `VITE_WS_URL`.
 
+### Environment files
+
+| File | Purpose | Commit to GitHub? |
+| --- | --- | --- |
+| `.env.example` | General configuration template | Yes |
+| `.env.local.example` | Local development template | Yes |
+| `.env.production.example` | Production frontend template | Yes |
+| `.env.local` | Real local values | **No** |
+| `.env.production` | Real production values | **No** |
+
+The `*.example` files contain **placeholders only** — never put real credentials in
+them (and note that `VITE_*` variables are public by design anyway).
+
+#### Local development
+
+Copy the example, then run the existing development commands:
+
+```bash
+cp .env.local.example .env.local
+npm run dev
+```
+
+(`.env.local` is ignored by Git — the `*.local` rule in `.gitignore`.)
+
+#### Vercel
+
+Set this in **Project → Settings → Environment Variables**:
+
+```env
+VITE_WS_URL=wss://YOUR-RENDER-SERVICE.onrender.com/ws
+```
+
+`VITE_WS_URL` is a build-time variable — **redeploy Vercel after adding or
+changing it**, otherwise nothing changes.
+
+#### Render
+
+Do **not** set `VITE_WS_URL` on Render — the backend doesn't read it.
+Render automatically provides:
+
+```env
+PORT
+```
+
+and `server/index.ts` uses that value (`0.0.0.0` binding, fallback 8787 locally).
+
 ### Architecture: who deploys what
 
 ```
@@ -207,6 +253,95 @@ npm run dev          # server :8787 + client :5173 in one command
   **does not silently switch to offline bots**. Practice mode remains available as an
   explicit option from the home page.
 - Rooms are in memory: a server restart clears them. There is intentionally no database.
+
+### Health endpoint & uptime
+
+The game server exposes two plain HTTP endpoints on the same port as WebSocket traffic:
+
+| Endpoint | Response |
+|---|---|
+| `GET /health` | `{"ok":true,"service":"boardquest-server","status":"healthy","timestamp":"…"}` — HTTP 200 |
+| `GET /` | `{"service":"boardquest-server","status":"running"}` |
+
+Both are fast, unauthenticated, and expose **no** secrets, rooms, players or env vars.
+Use `/health` for uptime monitoring — **never monitor `/ws` with an HTTP monitor**
+(it is a WebSocket endpoint, not an HTTP route).
+
+Run a full read-only production connectivity check (health + WebSocket handshake):
+
+```bash
+npm run check:prod
+# override the target if needed:
+BQ_PROD_URL=https://your-service.onrender.com npm run check:prod
+```
+
+This is a manually-run command: it never creates rooms or mutates production state,
+and an unreachable server must never fail a frontend build.
+
+### Deployment diagnostics & troubleshooting
+
+#### Render (backend)
+
+- **Service type:** Web Service · **Build command:** `npm install && npm run build` ·
+  **Start command:** `npm start`
+- **`PORT`:** Render injects it automatically; the server reads `process.env.PORT`
+  (fallback 8787 locally) and binds `0.0.0.0`. Never hardcode a port.
+- **WebSocket URL for the frontend:** `wss://<your-render-service>.onrender.com/ws` —
+  path is exactly `/ws`.
+- **Health endpoint:** `https://<your-render-service>.onrender.com/health`
+- **Logs:** Render Dashboard → your service → **Logs** tab. On boot you should see
+  `realtime server listening on ws://0.0.0.0:<PORT>/ws`. Shutdowns log
+  `SIGTERM received — shutting down`.
+- **Cold starts:** free tiers sleep after ~15 min idle; the first request then takes
+  up to ~50 s (see UptimeRobot below to mitigate).
+
+#### Vercel (frontend)
+
+- Required environment variable (Project → Settings → Environment Variables):
+  ```env
+  VITE_WS_URL=wss://monopoly-board-game.onrender.com/ws
+  ```
+- Vite env variables are **build-time** values baked into the bundle — after any
+  change you must **redeploy** Vercel for it to take effect.
+- Never commit real `.env` files; only `*.example` templates belong in the repo.
+
+#### Browser troubleshooting
+
+| Symptom | Where to look |
+|---|---|
+| Nothing happens after "Connecting…" | Open **DevTools → Console** for errors, then **Network tab** → filter **WS** → check the `/ws` entry's status (should be `101 Switching Protocols`) |
+| WebSocket shows as failed/pending | Confirm the URL is `wss://…/ws` (not `http://` or missing `/ws`) |
+| **Mixed-content error** in console | The page is HTTPS but `VITE_WS_URL` uses `ws://` — fix it to `wss://` and redeploy |
+| "Multiplayer is not configured" banner | `VITE_WS_URL` missing/invalid in the deployed build — set it in Vercel and **redeploy** |
+| Works locally, fails deployed | Check Render **Logs** for boot lines and restarts; confirm the Render service is awake (cold start delay up to ~50 s on free plans) |
+| Connection drops mid-game | The client auto-reconnects with its saved `playerId`; seats are held 60 s mid-game |
+
+### Keep Render awake (UptimeRobot)
+
+Render free services sleep when idle. A lightweight external pinger keeps the
+service warm and reduces cold starts:
+
+1. Open [UptimeRobot](https://uptimerobot.com).
+2. Create a **new HTTP(s) monitor**.
+3. Monitor type: **HTTP(s)**.
+4. Friendly name: `BoardQuest Render Health`.
+5. URL:
+   ```text
+   https://monopoly-board-game.onrender.com/health
+   ```
+6. Monitoring interval: **5 minutes**, or the closest available interval.
+7. Expected status: **HTTP 200**.
+8. Save the monitor.
+9. Confirm the endpoint returns a healthy response.
+
+Important caveats:
+
+- UptimeRobot **may reduce** Render sleeping/cold starts — it does **not** guarantee
+  100% uptime.
+- Render may still restart or sleep due to plan limits, deployments, errors, or
+  platform policies.
+- Keep `/health` lightweight — do not add logic to it.
+- Do **not** monitor `/ws` as an HTTP monitor. Use `/health` for UptimeRobot.
 
 ### Deployment verification checklist
 

@@ -12,7 +12,10 @@
     "preview": "vite preview",
     "test:protocol": "tsx scripts/test-protocol.ts",
     "test:e2e": "tsx scripts/test-e2e.ts",
-    "test:deploy": "tsx scripts/test-deploy.ts"
+    "test:deploy": "tsx scripts/test-deploy.ts",
+    "test:smoke": "tsx scripts/test-smoke.ts",
+    "test": "npm run test:protocol && npm run test:deploy && npm run test:smoke",
+    "check:prod": "tsx scripts/check-production.ts"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.6",

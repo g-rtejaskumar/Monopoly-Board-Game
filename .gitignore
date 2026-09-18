@@ -2,3 +2,12 @@ node_modules
 dist
 *.local
 .DS_Store
+
+# Environment files with real values — never commit.
+# (.env.local, .env.*.local and .env.production.local are already covered by
+# the *.local rule above; the *.example files are intentionally NOT ignored.)
+.env
+.env.production
+
+# Logs
+*.log

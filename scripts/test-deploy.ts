@@ -15,6 +15,7 @@
  */
 import { execSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
+import http from 'node:http'
 import net from 'node:net'
 import path from 'node:path'
 import WebSocket from 'ws'
@@ -139,6 +140,40 @@ async function testServerLifecycle(): Promise<void> {
     return
   }
 
+  // /health must answer without any WebSocket connection.
+  const health = await new Promise<{ status: number; body: string }>((resolve) => {
+    http.get(`http://127.0.0.1:${port}/health`, (res) => {
+      let body = ''
+      res.on('data', (c) => (body += c.toString()))
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }))
+    }).on('error', () => resolve({ status: 0, body: '' }))
+  })
+  check('/health returns HTTP 200', health.status === 200)
+  let healthJson: Record<string, unknown> = {}
+  try {
+    healthJson = JSON.parse(health.body)
+  } catch {
+    /* handled below */
+  }
+  check(
+    '/health returns valid JSON (ok/service/status/timestamp)',
+    healthJson.ok === true && healthJson.service === 'boardquest-server' && healthJson.status === 'healthy' && typeof healthJson.timestamp === 'string',
+  )
+  check(
+    '/health exposes no secrets, rooms, players or env vars',
+    !/port|env|room|player|token|key|secret|password/i.test(JSON.stringify(healthJson)),
+  )
+
+  // Root endpoint identity response.
+  const root = await new Promise<{ status: number; body: string }>((resolve) => {
+    http.get(`http://127.0.0.1:${port}/`, (res) => {
+      let body = ''
+      res.on('data', (c) => (body += c.toString()))
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }))
+    }).on('error', () => resolve({ status: 0, body: '' }))
+  })
+  check('GET / answers the identity JSON', root.status === 200 && /boardquest-server/.test(root.body))
+
   // Handshake on the canonical /ws path (proves path + server alive).
   const wsTest = await new Promise<boolean>((resolve) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
@@ -165,7 +200,7 @@ async function testServerLifecycle(): Promise<void> {
     ws.on('error', () => done(false))
     setTimeout(() => done(false), 5000)
   })
-  check('WebSocket handshake on /ws answers hello', wsTest)
+  check('WebSocket handshake on /ws answers hello (upgrade still works)', wsTest)
 
   // External host binding: 0.0.0.0 must accept a connection on the LAN address too.
   const os = await import('node:os')

@@ -289,6 +289,48 @@ function isBusyPhase(g: Game): boolean {
   return g.phase !== 'idle' && g.phase !== 'rolling' && g.phase !== 'moving'
 }
 
+/** Delay before an empty/zombie room is torn down after its last human leaves. */
+const ROOM_TEARDOWN_MS = 10_000
+/** Mid-game abandonment: wait out the reconnect grace before closing. */
+const ROOM_ABANDON_MS = REAP_MS + 5_000
+const roomTeardownTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+/**
+ * Set by server/index.ts so engine-level timers can ask the manager to close
+ * a room. Optional keeps rooms.ts usable without the wiring (tests, tools).
+ */
+let managerRef: {
+  hasRoom: (code: string) => boolean
+  closeRoom: (code: string, reason: string) => void
+} | null = null
+
+export function setManagerRef(ref: {
+  hasRoom: (code: string) => boolean
+  closeRoom: (code: string, reason: string) => void
+}): void {
+  managerRef = ref
+}
+
+/**
+ * Schedule deletion of a room that no human can ever return to (everyone left
+ * or a finished game with only bots). Delay gives a disconnected-but-seated
+ * human a grace window to reconnect before the room disappears.
+ */
+function scheduleRoomTeardown(room: Room, reason: string, delayMs = ROOM_TEARDOWN_MS): void {
+  const existing = roomTeardownTimers.get(room.code)
+  if (existing) return
+  const timer = setTimeout(() => {
+    roomTeardownTimers.delete(room.code)
+    const stillThere = managerRef?.hasRoom(room.code)
+    if (!stillThere) return
+    const anyHumanConnected = room.players.some((p) => !p.isBot && p.connected)
+    if (anyHumanConnected) return
+    clearBotTimer(room)
+    managerRef?.closeRoom(room.code, reason)
+  }, delayMs)
+  roomTeardownTimers.set(room.code, timer)
+}
+
 function scheduleBot(room: Room): void {
   if (!room.game || room.game.winner) return
   clearBotTimer(room)
@@ -1301,6 +1343,10 @@ function doDeclareBankrupt(room: Room, playerId: string): void {
     g.winner = alive[0]?.id ?? null
     const w = alive[0]
     if (w) pushLog(g, w.color, `${w.name} wins the game! 🏆`)
+    // If nobody human is left connected, schedule teardown — bots alone must
+    // not become a zombie room (no socket will ever trigger cleanup).
+    const humansConnected = room.players.some((p) => !p.isBot && p.connected)
+    if (!humansConnected) scheduleRoomTeardown(room, 'game finished with no humans left')
   }
   broadcastGame(room)
   if (!g.winner) {
@@ -1335,6 +1381,24 @@ export class RoomManager {
   private rooms = new Map<string, Room>()
   private members = new Map<string, Member>()
   private sinks = new Map<string, SendFn>()
+
+  /** Living rooms only (used by the zombie-room teardown scheduler). */
+  hasRoom(code: string): boolean {
+    return this.rooms.has(code)
+  }
+
+  /** Force-close a room: clear timers, drop members, remove it. */
+  closeRoom(code: string, reason: string): void {
+    const room = this.rooms.get(code)
+    if (!room) return
+    clearBotTimer(room)
+    for (const p of room.players) {
+      this.members.delete(p.id)
+      p.send = null
+    }
+    this.rooms.delete(code)
+    log(`room ${code}: closed (${reason})`)
+  }
 
   private attachSink(id: string, send: SendFn): void {
     this.sinks.set(id, send)
@@ -1599,6 +1663,13 @@ export class RoomManager {
           this.removeMember(m, 'reaper: seat forfeited after grace period')
         }, REAP_MS),
       )
+      // If NO human remains connected, the room can never progress meaningfully
+      // (bots alone would play on forever). Close it after the reconnect grace
+      // unless someone returns — the teardown re-checks connected humans.
+      const anyHumanConnected = room.players.some((p) => !p.isBot && p.connected)
+      if (!anyHumanConnected) {
+        scheduleRoomTeardown(room, 'all humans left the game', ROOM_ABANDON_MS)
+      }
       log(`room ${room.code}: ${m.name} disconnected (seat held)`)
     } else {
       this.removeMember(m, 'left lobby')
@@ -1691,6 +1762,7 @@ export class RoomManager {
     // Drop bankrupt players back into the lobby flow and reset.
     room.started = false
     room.game = null
+    clearBotTimer(room) // no stale bot/auction/move timers may survive the reset
     for (const p of room.players) p.ready = p.isHost
     broadcastRoom(room)
     log(`room ${room.code}: reset for another game`)
