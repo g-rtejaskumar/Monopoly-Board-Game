@@ -1,0 +1,326 @@
+.lobby-main {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  width: 100%;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 8px clamp(18px, 4vw, 44px) 48px;
+}
+
+.lobby-head {
+  margin: 14px 0 26px;
+}
+
+.lobby-head h1 {
+  font-family: var(--font-display);
+  font-size: clamp(30px, 3.4vw, 42px);
+  font-weight: 800;
+}
+
+.lobby-head p {
+  color: var(--text-2);
+  margin-top: 6px;
+  font-size: 16px;
+}
+
+.lobby-grid {
+  display: grid;
+  grid-template-columns: 0.9fr 1.25fr;
+  gap: 18px;
+  align-items: start;
+}
+
+/* -------------------------------- room card -------------------------------- */
+.room-card {
+  padding: 26px;
+  text-align: center;
+}
+
+.room-card-label {
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  margin-bottom: 12px;
+}
+
+.room-code {
+  font-family: var(--font-display);
+  font-size: clamp(38px, 5vw, 52px);
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  padding: 14px 10px 12px;
+  margin-bottom: 18px;
+  border-radius: 14px;
+  color: var(--amber);
+  background:
+    linear-gradient(180deg, rgba(245, 168, 60, 0.1), rgba(245, 168, 60, 0.03)),
+    rgba(7, 11, 22, 0.5);
+  border: 1px dashed rgba(245, 168, 60, 0.4);
+  text-shadow: 0 0 30px rgba(245, 168, 60, 0.35);
+  user-select: all;
+}
+
+.room-card-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.room-hint {
+  margin-top: 16px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+
+/* -------------------------------- slots card ------------------------------- */
+.slots-card {
+  padding: 24px 24px 20px;
+}
+
+.slots-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.slots-head h2 {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.slots-count {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text-2);
+  background: var(--panel-strong);
+  border: 1px solid var(--stroke);
+  padding: 5px 12px;
+  border-radius: 999px;
+}
+
+.slots {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.slot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(7, 11, 22, 0.4);
+  border: 1px solid var(--stroke);
+  animation: slot-in 0.35s cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+
+@keyframes slot-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+}
+
+.slot-avatar {
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 17px;
+  color: #1c1305;
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.35), 0 6px 14px -6px rgba(0, 0, 0, 0.6);
+  flex-shrink: 0;
+}
+
+.slot.empty .slot-avatar {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-3);
+  border: 1px dashed var(--stroke-strong);
+  box-shadow: none;
+  animation: pulse-soft 2.2s ease-in-out infinite;
+}
+
+.slot-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.slot-name {
+  font-weight: 700;
+  font-size: 15.5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.slot-sub {
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.chip {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--amber);
+  background: rgba(245, 168, 60, 0.12);
+  border: 1px solid rgba(245, 168, 60, 0.4);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.ready-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--mint);
+  font-weight: 600;
+}
+
+.ready-badge svg {
+  width: 13px;
+  height: 13px;
+}
+
+.add-bot {
+  width: 100%;
+  margin-top: 12px;
+  border-style: dashed;
+}
+
+.ready-toggle {
+  border-style: solid;
+}
+
+.ready-toggle.on {
+  border-color: rgba(61, 219, 168, 0.55);
+  color: var(--mint);
+  background: rgba(61, 219, 168, 0.08);
+}
+
+.net-pill {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 7px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke);
+  color: var(--text-3);
+}
+
+.net-pill.open {
+  color: var(--mint);
+  border-color: rgba(61, 219, 168, 0.45);
+  background: rgba(61, 219, 168, 0.08);
+}
+
+.net-pill.connecting {
+  color: var(--amber);
+  border-color: rgba(245, 168, 60, 0.4);
+  animation: pulse-soft 1.3s ease-in-out infinite;
+}
+
+.chip.me-chip {
+  color: var(--sky);
+  background: rgba(78, 163, 255, 0.12);
+  border-color: rgba(78, 163, 255, 0.4);
+}
+
+.chip.bot-chip {
+  color: var(--violet);
+  background: rgba(157, 123, 255, 0.12);
+  border-color: rgba(157, 123, 255, 0.4);
+}
+
+.offline-badge {
+  color: var(--amber);
+  font-weight: 600;
+  animation: pulse-soft 1.4s ease-in-out infinite;
+}
+
+.waiting-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 20px;
+  border-radius: 14px;
+  background: var(--panel-strong);
+  border: 1px solid var(--stroke);
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text-2);
+}
+
+.linklike {
+  background: none;
+  border: none;
+  color: var(--sky);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+
+/* -------------------------------- start card ------------------------------- */
+.start-card {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 18px;
+  padding: 22px 26px;
+}
+
+.start-info h2 {
+  font-family: var(--font-display);
+  font-size: 23px;
+  font-weight: 800;
+  margin-bottom: 4px;
+}
+
+.start-info p {
+  color: var(--text-2);
+  font-size: 14.5px;
+}
+
+.start-btn {
+  min-width: 230px;
+}
+
+.start-hint {
+  width: 100%;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.start-rules {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  padding-top: 14px;
+  border-top: 1px solid var(--stroke);
+  font-size: 13.5px;
+  color: var(--text-2);
+}
+
+/* ------------------------------- responsive ------------------------------- */
+@media (max-width: 880px) {
+  .lobby-grid {
+    grid-template-columns: 1fr;
+  }
+}

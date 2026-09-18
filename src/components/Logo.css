@@ -1,0 +1,77 @@
+.logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  user-select: none;
+}
+
+.logo-dice {
+  width: 40px;
+  height: 40px;
+  filter: drop-shadow(0 6px 14px color-mix(in srgb, var(--accent, #f08c1f) 55%, transparent));
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.5s ease;
+  animation: logo-tumble 7s ease-in-out infinite;
+}
+
+.logo:hover .logo-dice {
+  transform: rotate(-14deg) scale(1.08);
+}
+
+@keyframes logo-tumble {
+  0%,
+  78%,
+  100% {
+    transform: rotate(0deg);
+  }
+  86% {
+    transform: rotate(-12deg) scale(1.06);
+  }
+  93% {
+    transform: rotate(7deg);
+  }
+}
+
+.logo-dice svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.logo-word {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  color: var(--text-1);
+  line-height: 1;
+}
+
+.logo-word em {
+  font-style: normal;
+  background: linear-gradient(92deg, #ffd27a 0%, var(--amber) 55%, #ff9d5c 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+.logo-sm {
+  gap: 9px;
+  font-size: 19px;
+}
+.logo-sm .logo-dice {
+  width: 27px;
+  height: 27px;
+}
+
+.logo-md {
+  font-size: 24px;
+}
+
+.logo-lg {
+  gap: 16px;
+  font-size: clamp(40px, 6.4vw, 64px);
+}
+.logo-lg .logo-dice {
+  width: clamp(52px, 7.4vw, 78px);
+  height: clamp(52px, 7.4vw, 78px);
+}

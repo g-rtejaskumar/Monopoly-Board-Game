@@ -1,0 +1,39 @@
+{
+  "name": "boardquest",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c yellow,cyan \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:client": "vite",
+    "dev:server": "tsx watch server/index.ts",
+    "build": "tsc --noEmit && tsc --noEmit -p tsconfig.server.json && vite build",
+    "start": "tsx server/index.ts",
+    "preview": "vite preview",
+    "test:protocol": "tsx scripts/test-protocol.ts",
+    "test:e2e": "tsx scripts/test-e2e.ts"
+  },
+  "dependencies": {
+    "@react-three/drei": "^10.7.6",
+    "@react-three/fiber": "^9.3.0",
+    "react": "~19.2.0",
+    "react-dom": "~19.2.0",
+    "react-router-dom": "^7.9.0",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.0.2",
+    "concurrently": "^9.2.1",
+    "playwright": "^1.63.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3",
+    "ws": "^8.18.3"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

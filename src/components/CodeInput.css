@@ -1,0 +1,67 @@
+.code-input {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.code-cell {
+  width: 46px;
+  height: 58px;
+  text-align: center;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 27px;
+  color: var(--text-1);
+  background: rgba(7, 11, 22, 0.6);
+  border: 1.5px solid var(--stroke);
+  border-radius: 13px;
+  outline: none;
+  text-transform: uppercase;
+  caret-color: var(--amber);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease,
+    background 0.15s ease;
+}
+
+.code-cell:hover:not(:disabled) {
+  border-color: var(--stroke-strong);
+}
+
+.code-cell.active {
+  border-color: rgba(245, 168, 60, 0.7);
+  box-shadow: 0 0 0 4px rgba(245, 168, 60, 0.15);
+  background: rgba(7, 11, 22, 0.85);
+  transform: translateY(-2px);
+}
+
+.code-cell[data-filled] {
+  background: linear-gradient(180deg, rgba(245, 168, 60, 0.13), rgba(245, 168, 60, 0.05));
+  border-color: rgba(245, 168, 60, 0.45);
+  animation: cell-pop 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.code-cell:disabled {
+  opacity: 0.5;
+}
+
+@keyframes cell-pop {
+  0% {
+    transform: scale(0.82);
+  }
+  60% {
+    transform: scale(1.07);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@media (max-width: 420px) {
+  .code-cell {
+    width: 40px;
+    height: 52px;
+    font-size: 23px;
+  }
+  .code-input {
+    gap: 6px;
+  }
+}
