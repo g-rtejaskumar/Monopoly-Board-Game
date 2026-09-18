@@ -4,6 +4,8 @@
  * and a small pub/sub for server pushes.
  */
 import type { ClientMsg, ServerMsg } from './protocol'
+import { resolveWsUrl } from './wsUrl'
+import type { ResolvedWsUrl } from './wsUrl'
 
 const ID_KEY = 'boardquest.net.identity.v2'
 
@@ -11,30 +13,24 @@ const ID_KEY = 'boardquest.net.identity.v2'
  * Resolve the realtime WebSocket endpoint.
  *
  * Order of precedence:
- *  1. VITE_WS_URL env var (set at build time) — used verbatim, e.g. wss://games.example.com/ws
- *  2. Dev default: same-origin /boardquest-ws, which the Vite dev server proxies to ws://localhost:8787
+ *  1. VITE_WS_URL env var (build time) — validated strictly (ws:// or wss:// only)
+ *  2. Dev only: same-origin /boardquest-ws, which the Vite dev server proxies to ws://localhost:8787
  *
- * NOTE for production: Vercel (static hosting) does NOT proxy WebSockets. Deployments
- * MUST set VITE_WS_URL to the deployed game server's wss:// endpoint — see README.
+ * PRODUCTION never falls back to the dev proxy: an unset/invalid VITE_WS_URL is a
+ * configuration error surfaced in the UI (ConnBanner), not a silent wrong dial.
+ * See src/net/wsUrl.ts and README "Deploy BoardQuest".
  */
-function wsUrl(): string {
+function resolveEndpoint(): ResolvedWsUrl {
   const env = import.meta.env?.VITE_WS_URL as string | undefined
-  if (env && env.trim().length > 0) {
-    const url = env.trim()
-    if (!/^wss?:\/\//i.test(url)) {
-      console.warn('[net] VITE_WS_URL must start with ws:// or wss:// — ignoring invalid value')
-    } else {
-      return url
-    }
-  }
-  // Dev default: go through the Vite proxy (same origin). This path is intentionally
-  // only correct under the Vite dev server; see README "Deploy BoardQuest".
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${proto}//${window.location.host}/boardquest-ws`
+  return resolveWsUrl(env, IS_PROD)
 }
 
 /** True when the app was built for production (vite build). */
 export const IS_PROD = import.meta.env?.PROD === true
+/** Message to show when the WebSocket configuration itself is broken (prod). */
+export function getConfigError(): string | null {
+  return resolveEndpoint().configError
+}
 
 /** Failed attempts before the client reports the server as unreachable. */
 const UNREACHABLE_AFTER_FAILURES = 4
@@ -74,7 +70,7 @@ export function clearNetIdentity(): void {
 
 type Listener = (msg: ServerMsg) => void
 
-export type NetStatus = 'connecting' | 'open' | 'closed' | 'unreachable'
+export type NetStatus = 'connecting' | 'open' | 'closed' | 'unreachable' | 'config-error'
 
 export class NetClient {
   private ws: WebSocket | null = null
@@ -103,8 +99,15 @@ export class NetClient {
       return
     }
     this.closedByUs = false
+    // A broken configuration is not a connection problem: surface it immediately
+    // and never pretend to be connecting/reconnecting to a wrong endpoint.
+    const cfg = resolveEndpoint()
+    if (cfg.configError) {
+      this.setStatus('config-error')
+      return
+    }
     this.setStatus('connecting')
-    const url = wsUrl()
+    const url = cfg.url
     let ws: WebSocket
     try {
       ws = new WebSocket(url)

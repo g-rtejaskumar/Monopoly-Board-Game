@@ -11,12 +11,14 @@ import type { WebSocket } from 'ws'
 import type { ClientMsg } from '../src/net/protocol'
 import { RoomManager, log } from './rooms'
 
-// Deploy note: this process must run on a host that permits long-lived WebSocket
-// connections (Railway/Render/Fly/VPS/Docker). Set PORT to the host's
-// required value; frontends connect with VITE_WS_URL=wss://<this-host>/ws (see README).
+// Deploy note (Render and similar hosts): this process must run on a host that
+// permits long-lived WebSocket connections. Render injects PORT automatically;
+// local development falls back to 8787. Frontends connect with
+// VITE_WS_URL=wss://<this-host>/ws (see README "Deploy BoardQuest").
 const PORT = Number(process.env.PORT || 8787)
+const HOST = '0.0.0.0' // externally reachable on PaaS hosts; localhost-only would fail there
 // No `path` restriction: direct clients use /ws, the Vite dev proxy uses /boardquest-ws.
-const wss = new WebSocketServer({ port: PORT })
+const wss = new WebSocketServer({ host: HOST, port: PORT })
 
 interface Conn {
   ws: WebSocket
@@ -223,7 +225,7 @@ function handle(conn: Conn, msg: ClientMsg): void {
 
 /* ---------------------------------- heartbeat ---------------------------------- */
 const INTERVAL = 30_000
-setInterval(() => {
+const heartbeatTimer = setInterval(() => {
   for (const conn of connections) {
     if (!conn.alive) {
       conn.ws.terminate()
@@ -235,8 +237,33 @@ setInterval(() => {
 }, INTERVAL)
 
 wss.on('listening', () => {
-  log(`realtime server listening on ws://localhost:${PORT}/ws`)
-  if (!process.env.PORT) {
-    log('tip: set PORT in production so your host routes traffic to this server')
-  }
+  const addr = wss.address()
+  const shownPort = typeof addr === 'object' && addr ? addr.port : PORT
+  log(`realtime server listening on ws://${HOST}:${shownPort}/ws`)
+  log(process.env.PORT ? `using PORT from environment (${PORT})` : 'PORT not set — dev default 8787')
+  log('WebSocket path: /ws (the Vite dev proxy also forwards /boardquest-ws here)')
 })
+
+/* ------------------------------ graceful shutdown ------------------------------ */
+// Render and other PaaS send SIGTERM before stopping a service: close the listener,
+// terminate sockets promptly, and exit so the platform sees a clean shutdown.
+function shutdown(signal: string): void {
+  log(`${signal} received — shutting down (rooms are in-memory and will be cleared)`)
+  clearInterval(heartbeatTimer)
+  wss.close(() => {
+    log('server closed')
+    process.exit(0)
+  })
+  // Don't wait on idle game sockets: terminate them all now.
+  for (const conn of connections) {
+    try {
+      conn.ws.terminate()
+    } catch {
+      /* already closed */
+    }
+  }
+  // Failsafe if close callback stalls.
+  setTimeout(() => process.exit(0), 3000).unref()
+}
+const shutdownSignals: NodeJS.Signals[] = ['SIGTERM', 'SIGINT']
+shutdownSignals.forEach((sig) => process.on(sig, () => shutdown(sig)))

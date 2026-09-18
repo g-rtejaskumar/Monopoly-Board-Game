@@ -27,10 +27,12 @@ function check(name: string, cond: boolean, extra = ''): void {
 
 async function createGame(page: Page, name: string): Promise<string> {
   await page.goto(BASE)
-  await page.getByRole('button', { name: /Play With Friends/i }).click()
+  // force: the hero WebGL canvas causes intermittent main-thread GPU stalls that
+  // break Playwright's actionability wait even though the buttons are clickable.
+  await page.getByRole('button', { name: /Play With Friends/i }).click({ force: true })
   await page.getByPlaceholder('e.g. Maple').fill(name)
-  await page.getByRole('button', { name: /Create Game/i }).click()
-  await page.waitForURL(/\/lobby\/[A-Z0-9]{6}/, { timeout: 15000 })
+  await page.getByRole('button', { name: /Create Game/i }).click({ force: true })
+  await page.waitForURL(/\/lobby\/[A-Z0-9]{6}/, { timeout: 20000 })
   const url = page.url()
   return url.split('/lobby/')[1] ?? ''
 }
@@ -42,7 +44,7 @@ async function joinGame(page: Page, name: string, code: string): Promise<void> {
   await page
     .getByRole('dialog', { name: 'Join a game' })
     .getByRole('button', { name: /Join Game/i })
-    .click()
+    .click({ force: true })
   await page.waitForURL(/\/lobby\/[A-Z0-9]{6}/, { timeout: 15000 })
 }
 
@@ -153,20 +155,37 @@ async function railText(page: Page): Promise<string[]> {
   )
 }
 
-/** Wait until both browsers agree on the dice values shown in the toast/log. */
+/**
+ * Wait until both browsers agree on the server's dice result. Read from the
+ * game log ("Alice rolled 9") — the deed dice row can be temporarily replaced
+ * by the event modal or hidden during move animations. Poll until convergence.
+ */
 async function pageUrlHasDice(active: Page, idle: Page): Promise<void> {
-  const readDice = async (p: Page): Promise<string> => {
+  const readRoll = async (p: Page): Promise<string> => {
     try {
-      await p.waitForSelector('.deed-dice', { timeout: 20000 })
-      return (await p.textContent('.deed-dice'))?.trim() ?? ''
+      // If an event/deed modal is open, dismiss it like a real player would.
+      const cont = p.locator('.modal button:has-text("Continue")')
+      if (await cont.count()) await cont.first().click({ force: true, timeout: 2000 }).catch(() => {})
+      const entries = await p.locator('.log-entry').allTextContents()
+      const rolls = entries.map((e) => e.trim()).filter((e) => /rolled \d+/.test(e))
+      return rolls.at(-1)?.match(/rolled (\d+)/)?.[1] ?? ''
     } catch {
-      console.log(`[diag] dice read failed on ${p.url()}`)
-      console.log(`[diag] body: ${(await p.textContent('body'))?.slice(0, 300)}`)
       return ''
     }
   }
-  const a = await readDice(active)
-  const b = await readDice(idle)
+  const deadline = Date.now() + 60_000
+  let a = ''
+  let b = ''
+  while (Date.now() < deadline) {
+    a = await readRoll(active)
+    b = await readRoll(idle)
+    if (a.length > 0 && a === b) break
+    await new Promise((r) => setTimeout(r, 1000))
+  }
+  if (a.length === 0 || a !== b) {
+    console.log(`[diag] dice read failed on ${active.url()}`)
+    console.log(`[diag] body: ${(await active.textContent('body'))?.slice(0, 300)}`)
+  }
   check('both browsers received the same server dice roll', a.length > 0 && a === b, `"${a}" vs "${b}"`)
 }
 

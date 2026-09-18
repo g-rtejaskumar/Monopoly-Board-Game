@@ -381,6 +381,25 @@ body {
   opacity: 0.85;
 }
 
+.conn-banner-retry {
+  display: inline-block;
+  margin-top: 8px;
+  margin-left: 12px;
+  padding: 5px 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.conn-banner-retry:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
 @keyframes banner-in {
   from {
     opacity: 0;

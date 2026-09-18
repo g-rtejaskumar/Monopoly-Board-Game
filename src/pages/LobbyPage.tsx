@@ -78,7 +78,7 @@ function ServerLobby({ code, room }: { code: string; room: RoomSnapshot }) {
     <div className="page lobby">
       <div className="bg-glow" />
       <div className="bg-grid" />
-      <ConnBanner status={net.status} canPractice />
+      <ConnBanner status={net.status} canPractice onRetry={() => net.net?.connect()} />
 
       <header className="topbar">
         <Logo size="sm" />

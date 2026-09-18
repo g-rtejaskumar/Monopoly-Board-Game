@@ -8,8 +8,8 @@ code, and play with friends in the browser. Built with React, TypeScript, Three.
 
 - **Landing** — animated hero with a floating 3D board, Play With Friends / Create / Join flows
 - **Lobby** — live room code sharing, real-time player slots, ready-up, practice rivals
-- **Game board** — isometric 3D board with 32 hand-crafted tiles, tumbling dice, hopping pawns,
-  turn system, title-deed buy modal, surprise events, game log and table chat
+- **Game board** — isometric 3D board with 40 classic-layout tiles, tumbling dice, hopping pawns,
+  turn system, title-deed buy modal, trading/mortgages/auctions, surprise events, game log and table chat
 
 ## Architecture
 
@@ -93,48 +93,90 @@ BoardQuest is two deployable pieces:
 > functions — neither supports persistent WebSocket connections. Deploy the server
 > separately and point the frontend at it with `VITE_WS_URL`.
 
-### Frontend (Vercel)
+### Architecture: who deploys what
 
-1. Push this repo to GitHub/GitLab.
-2. In Vercel: **Add New → Project** → import the repo. Vercel detects Vite automatically;
-   otherwise: build command `npm run build`, output directory `dist` (see `vercel.json`).
-3. **Set the environment variable** — Project → Settings → Environment Variables:
-   ```
-   VITE_WS_URL = wss://your-game-server.example.com/ws
-   ```
-   Use `wss://` (TLS) in production — browsers block insecure `ws://` from `https://` pages.
-   **Do not deploy without this**: the client would try to reach a WebSocket on the Vercel
-   domain itself, which does not exist, and multiplayer will not connect. `VITE_*` variables
-   are public by design — never put secrets in them.
-4. Deploy. Direct routes (`/`, `/lobby/ABC123`, `/play/ABC123`) work after refresh thanks
-   to the SPA rewrite in `vercel.json`.
-5. To test the production bundle locally first: `npm run build && npm run preview`.
-
-### Realtime server (Node host)
-
-The server is a single process with no database.
-
-```bash
-npm install          # ws + tsx are already in package.json
-PORT=8787 npm start  # starts server/index.ts on the given port
+```
+User browser
+    |
+    | HTTPS
+    v
+Vercel                       (React/Vite frontend — src/, public/, SPA routes)
+    |
+    | WSS using VITE_WS_URL  (build-time env var)
+    v
+Render Node service          (npm start → server/index.ts)
+    |
+    v
+WebSocket rooms and game state  (server-authoritative, in memory)
 ```
 
-- **Environment variables:** `PORT` (defaults to 8787). No secrets required.
-- **Health check / connection test:** from any machine,
-  `npx wscat -c wss://your-game-server.example.com/ws` — you should get an open socket
-  (send `{"t":"hello","name":"tester"}` to get a hello reply).
-- **Deploying to Railway/Render/Fly:** point the service at the repo root, start command
-  `npm start`, and set `PORT` to the port the platform assigns (they inject it as an env
-  var automatically). Enable WebSocket support in the platform settings if asked.
-- **Keep it warm:** rooms live in memory. If the process restarts, all rooms are lost —
-  players keep their seats only while the process lives. Choose a plan without frequent
-  restarts, or add a persistent store later.
+| Concern | Vercel deploys | Render deploys |
+|---|---|---|
+| What | React/Vite frontend: `src/`, `public/`, Vite build output (`dist/`), static assets, SPA routes | Node WebSocket server: `server/index.ts`, room management, server-authoritative game state, all WS messages |
+| Command | `npm run build` → publishes `dist/` | `npm start` (runs `tsx server/index.ts`) |
+
+Both services may use the **same GitHub repository** — they simply run different
+commands. No `frontend/` or `backend/` folder split is needed.
+
+### Frontend (Vercel)
+
+```
+Framework:        Vite (auto-detected)
+Root directory:   blank
+Install command:  npm install
+Build command:    npm run build
+Output directory: dist
+```
+
+1. Push this repo to GitHub/GitLab.
+2. In Vercel: **Add New → Project** → import the repo. Settings above are in
+   `vercel.json`; Vercel detects Vite automatically.
+3. **Set the environment variable** — Project → Settings → Environment Variables:
+   ```
+   VITE_WS_URL = wss://your-render-service.onrender.com/ws
+   ```
+   Use `wss://` (TLS) in production — browsers block insecure `ws://` from `https://` pages.
+   **`VITE_WS_URL` is a build-time variable baked into the bundle: after changing it you
+   MUST redeploy the frontend** (no redeploy = no effect). Do not deploy without it: the
+   client would otherwise show a "Multiplayer is not configured" banner instead of connecting.
+   `VITE_*` variables are public by design — never put secrets in them.
+4. Deploy. Direct routes (`/`, `/lobby/ABC123`, `/play/ABC123`, `/join?join=CODE`) work
+   after refresh thanks to the SPA rewrite in `vercel.json`.
+5. To test the production bundle locally first: `npm run build && npm run preview`.
+
+### Realtime server (Render)
+
+```
+Service type:     Web Service
+Language:         Node
+Root directory:   blank
+Build command:    npm install && npm run build
+Start command:    npm start
+```
+
+- **Render provides `PORT`** and the backend reads `process.env.PORT` (fallback 8787 for
+  local dev) — never hardcode the port. The server binds `0.0.0.0` so it is externally
+  reachable, logs the listening port on boot, and shuts down cleanly on SIGTERM.
+- The public backend URL converts to a WebSocket URL by swapping scheme and appending the
+  socket path:
+  ```text
+  Backend HTTPS URL:     https://your-service.onrender.com
+  Frontend WebSocket URL: wss://your-service.onrender.com/ws
+  ```
+- Production uses `wss://` (Render terminates TLS at the edge).
+- **Free/low tiers may sleep or restart** the service; a restart clears all rooms (state
+  is in memory by design — no database required). Players can re-create a room in seconds,
+  but mid-game state is not recoverable.
+- The backend keeps **persistent WebSocket connections** open (30 s heartbeat); Render
+  Web Services support this natively — no extra configuration.
+- Connection test from any machine: `npx wscat -c wss://your-service.onrender.com/ws`,
+  then send `{"t":"hello","name":"tester"}` — you should get a `you` reply with a playerId.
 
 ### Connect frontend ↔ backend
 
-1. Deploy the server, note its public URL, e.g. `https://boardquest-gameserver.up.railway.app`.
-2. Set `VITE_WS_URL = wss://boardquest-gameserver.up.railway.app/ws` in Vercel.
-3. Redeploy the frontend (Vite bakes `VITE_WS_URL` in at build time).
+1. Deploy the Render service, note its public URL, e.g. `https://your-service.onrender.com`.
+2. Set `VITE_WS_URL = wss://your-service.onrender.com/ws` in Vercel.
+3. **Redeploy the frontend** (Vite bakes `VITE_WS_URL` in at build time).
 
 ### Testing checklist
 
@@ -165,6 +207,44 @@ npm run dev          # server :8787 + client :5173 in one command
   **does not silently switch to offline bots**. Practice mode remains available as an
   explicit option from the home page.
 - Rooms are in memory: a server restart clears them. There is intentionally no database.
+
+### Deployment verification checklist
+
+## Backend verification
+
+- [ ] GitHub repository is up to date
+- [ ] Render service created
+- [ ] Build command succeeds
+- [ ] `npm start` succeeds
+- [ ] Render assigns and server reads `PORT`
+- [ ] Backend is publicly reachable
+- [ ] WebSocket endpoint uses `/ws`
+- [ ] Backend logs show the listening port
+
+## Frontend verification
+
+- [ ] Vercel project created
+- [ ] `npm run build` succeeds
+- [ ] Output directory is `dist`
+- [ ] `VITE_WS_URL` is configured
+- [ ] Frontend redeployed after setting the variable
+- [ ] Direct routes work after refresh
+- [ ] No production localhost URL exists
+
+## Real multiplayer verification
+
+- [ ] Two different computers open the Vercel URL
+- [ ] Player A creates a room
+- [ ] Player B joins the room
+- [ ] Both players see the same room
+- [ ] Dice rolls synchronize
+- [ ] Movement synchronizes
+- [ ] Cash updates synchronize
+- [ ] Property ownership synchronizes
+- [ ] Rent transfers synchronize
+- [ ] Chat synchronizes
+- [ ] Refresh/reconnect works
+- [ ] Practice mode remains separate
 
 ## Status — multiplayer milestone 1 ✅
 
