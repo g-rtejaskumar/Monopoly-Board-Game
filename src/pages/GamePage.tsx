@@ -29,9 +29,93 @@ interface Toast {
 export function GamePage() {
   const { roomCode = '' } = useParams()
   const net = useNet()
+  const navigate = useNavigate()
 
   // Net mode is active whenever the server has a game for this room code.
   const netGame = net.game && net.game.code === roomCode.toUpperCase() ? net.game : null
+
+  // Whether this mount has ever seen the live game (used to tell a Play-Again
+  // reset apart from a lost room).
+  const wasInGameRef = useRef(false)
+  useEffect(() => {
+    if (netGame) wasInGameRef.current = true
+  }, [netGame])
+
+  const roomMatches = net.room !== null && net.room.code === roomCode.toUpperCase()
+
+  // Play-Again reset: the server cleared the game and everyone is back in the
+  // lobby — follow it instead of silently dropping into practice mode.
+  useEffect(() => {
+    if (!netGame && wasInGameRef.current && roomMatches && net.room && !net.room.started) {
+      wasInGameRef.current = false
+      navigate(`/lobby/${roomCode.toUpperCase()}`)
+    }
+  }, [netGame, roomMatches, net.room, navigate, roomCode])
+
+  // Guard: online with a known identity but the server has no game for this
+  // room. Falling back to practice mode here would fake a local single-player
+  // table inside what LOOKS like the multiplayer room (e.g. after a server
+  // restart or a room teardown). Say so instead.
+  const looksOnlineButRoomless =
+    !netGame && net.status === 'open' && net.youId !== null && roomCode !== '' && !roomMatches
+  if (looksOnlineButRoomless) {
+    return (
+      <div className="page game">
+        <div className="bg-glow" />
+        <div className="bg-grid" />
+        <header className="game-topbar">
+          <Logo size="sm" />
+          <div className="game-code">ROOM {roomCode.toUpperCase()}</div>
+          <div className="topbar-actions">
+            <ModeBadge mode="online" />
+          </div>
+        </header>
+        <main className="lobby-main">
+          <section className="panel room-card" style={{ textAlign: 'center' }}>
+            <p className="room-card-label">This game table is no longer available</p>
+            <div className="room-code">{roomCode.toUpperCase()}</div>
+            <p className="room-hint">
+              The match may have ended, the server restarted, or everyone left. Start a fresh room
+              to play again.
+            </p>
+            <div className="room-card-actions" style={{ justifyContent: 'center' }}>
+              <button className="btn btn-primary" onClick={() => navigate('/')}>
+                Back to home
+              </button>
+            </div>
+          </section>
+        </main>
+      </div>
+    )
+  }
+
+  // Limbo: the room still exists and is running, but our snapshot has not
+  // (yet) arrived — a reconnect in flight. Show an honest waiting state; the
+  // server pushes `started` + `state` as soon as the seat re-binds.
+  if (!netGame && roomMatches && net.room?.started) {
+    return (
+      <div className="page game">
+        <div className="bg-glow" />
+        <div className="bg-grid" />
+        <header className="game-topbar">
+          <Logo size="sm" />
+          <div className="game-code">ROOM {roomCode.toUpperCase()}</div>
+          <div className="topbar-actions">
+            <ModeBadge mode="online" />
+          </div>
+        </header>
+        <main className="lobby-main">
+          <section className="panel room-card" style={{ textAlign: 'center' }}>
+            <p className="room-card-label">
+              <span className="spinner" style={{ marginRight: 8 }} />
+              Reconnecting to the table…
+            </p>
+            <p className="room-hint">Restoring your seat and the current game state.</p>
+          </section>
+        </main>
+      </div>
+    )
+  }
 
   if (netGame) {
     return <NetGame roomCode={roomCode.toUpperCase()} game={netGame} />
@@ -45,6 +129,23 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
   const navigate = useNavigate()
   const net = useNet()
   const { store, onServerMsg } = useMemo(() => createNetBoardStore(), [])
+
+  // Server-reported problems (bad bid, expired trade, rejected action…) surface
+  // as a small dismissible toast — never a silent failure, never a stack trace.
+  const [actionError, setActionError] = useState<{ message: string; id: number } | null>(null)
+  const errSeq = useRef(0)
+  useEffect(() => {
+    if (!net.net) return
+    const off = net.net.onMessage((m) => {
+      if (m.t === 'err') setActionError({ message: m.message, id: ++errSeq.current })
+    })
+    return off
+  }, [net.net])
+  useEffect(() => {
+    if (!actionError) return
+    const t = window.setTimeout(() => setActionError(null), 6000)
+    return () => window.clearTimeout(t)
+  }, [actionError])
 
   // Subscribe BEFORE feeding snapshots so no notify is ever missed.
   const [, force] = useReducer((n: number) => n + 1, 0)
@@ -202,6 +303,20 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
       {disconnected && (
         <div className="net-banner">
           <span className="spinner" /> Reconnecting to the table…
+        </div>
+      )}
+
+      {actionError && !disconnected && (
+        <div className="net-banner net-banner--error" role="alert">
+          {actionError.message}
+          <button
+            type="button"
+            className="conn-banner-retry"
+            style={{ marginLeft: 10 }}
+            onClick={() => setActionError(null)}
+          >
+            Dismiss
+          </button>
         </div>
       )}
 

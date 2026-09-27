@@ -23,6 +23,12 @@
   backdrop-filter: blur(8px);
 }
 
+.net-banner--error {
+  background: rgba(46, 16, 24, 0.92);
+  border-color: rgba(255, 107, 138, 0.4);
+  color: #ffb3c2;
+}
+
 /* -------------------------------- top bar -------------------------------- */
 .game-topbar {
   position: relative;

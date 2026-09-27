@@ -69,9 +69,19 @@ export function NetProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!net) return
+    // Track the identity this session's room/game state belongs to. If the
+    // server hands us a DIFFERENT player id (e.g. after a Render restart wiped
+    // in-memory rooms), every cached room/game/seat is dead — clear it so the
+    // UI cannot act on ghosts from the previous process.
+    const identityRef = { current: null as string | null }
     const offMsg = net.onMessage((msg) => {
       switch (msg.t) {
         case 'you':
+          if (identityRef.current !== null && identityRef.current !== msg.playerId) {
+            setRoom(null)
+            setGame(null)
+          }
+          identityRef.current = msg.playerId
           setYouId(msg.playerId)
           break
         case 'created':
@@ -153,10 +163,10 @@ export function NetProvider({ children }: { children: ReactNode }) {
   const declareBankrupt = useCallback(() => viaRef((c) => c.send({ t: 'declareBankrupt' })), [viaRef])
   const playAgain = useCallback(() => viaRef((c) => c.send({ t: 'playAgain' })), [viaRef])
   const leaveRoom = useCallback(() => {
-    net?.send({ t: 'leaveRoom' })
+    viaRef((c) => c.send({ t: 'leaveRoom' }))
     setRoom(null)
     setGame(null)
-  }, [net])
+  }, [viaRef])
   const dismissError = useCallback(() => setError(null), [])
 
   const value = useMemo<NetContextValue>(

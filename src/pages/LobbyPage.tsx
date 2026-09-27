@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Logo } from '../components/Logo'
 import { IconArrowLeft, IconCheck, IconCopy, IconPlay, IconPlus } from '../components/Icons'
@@ -40,15 +40,21 @@ function ServerLobby({ code, room }: { code: string; room: RoomSnapshot }) {
   const readyCount = players.filter((p) => p.ready).length
   const canStart = players.length >= MIN_PLAYERS && readyCount === players.length
 
-  // When the host starts, the server pushes 'started' → navigate.
+  // When the host starts, the server pushes 'started' → navigate. The ref
+  // latches the transition so a later Play-Again reset (game → null) cannot
+  // yank a player who is already on the board back into the lobby.
   const gameStarted = Boolean(net.game && net.game.code === code)
+  const startedRef = useRef(false)
   useEffect(() => {
-    if (gameStarted) navigate(`/play/${code}`)
+    if (gameStarted) {
+      startedRef.current = true
+      navigate(`/play/${code}`)
+    }
   }, [gameStarted, navigate, code])
 
   // Someone else might see the game already running (late refresh).
   useEffect(() => {
-    if (room.started && !gameStarted) navigate(`/play/${code}`)
+    if ((room.started || startedRef.current) && !gameStarted) navigate(`/play/${code}`)
   }, [room.started, gameStarted, navigate, code])
 
   const copy = useCallback(async (text: string) => {

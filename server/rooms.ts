@@ -183,6 +183,17 @@ function pushLog(g: Game, color: string, text: string): void {
 
 let chatId = 0
 let tradeId = 0
+/** How long a trade offer waits for a response before expiring. */
+const TRADE_TIMEOUT_MS = 30_000
+const tradeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function clearTradeTimer(room: Room): void {
+  const t = tradeTimers.get(room.code)
+  if (t) {
+    clearTimeout(t)
+    tradeTimers.delete(room.code)
+  }
+}
 
 function gameSnapshot(room: Room): GameSnapshot {
   const g = room.game as Game
@@ -253,6 +264,7 @@ function startGame(room: Room): void {
   pushLog(game, game.players[0]?.color ?? COLORS[0], `${game.players[0]?.name ?? 'Player'} goes first`)
   room.game = game
   room.started = true
+  clearLobbyTeardownTimer(room)
   const started: ServerMsg = { t: 'started', game: gameSnapshot(room) }
   for (const p of room.players) p.send?.(started)
   log(`room ${room.code}: game started with ${room.players.length} players`)
@@ -263,7 +275,8 @@ function startGame(room: Room): void {
 const botTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const moveTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const auctionTimers = new Map<string, ReturnType<typeof setTimeout>>()
-const REAP_MS = 60_000
+/** Seat-grace period; BQ_REAP_MS shortens it for tests only (min 1s). */
+const REAP_MS = Math.max(1_000, Number(process.env.BQ_REAP_MS || 60_000))
 const reapTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 function clearBotTimer(room: Room): void {
@@ -290,10 +303,13 @@ function isBusyPhase(g: Game): boolean {
 }
 
 /** Delay before an empty/zombie room is torn down after its last human leaves. */
-const ROOM_TEARDOWN_MS = 10_000
+const ROOM_TEARDOWN_MS = Math.max(1_000, Number(process.env.BQ_TEARDOWN_MS || 10_000))
 /** Mid-game abandonment: wait out the reconnect grace before closing. */
 const ROOM_ABANDON_MS = REAP_MS + 5_000
 const roomTeardownTimers = new Map<string, ReturnType<typeof setTimeout>>()
+/** Grace before an unstarted lobby with no connected humans is torn down. */
+const LOBBY_ABANDON_MS = Math.max(1_000, Number(process.env.BQ_LOBBY_MS || 30_000))
+const lobbyTeardownTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 /**
  * Set by server/index.ts so engine-level timers can ask the manager to close
@@ -326,9 +342,36 @@ function scheduleRoomTeardown(room: Room, reason: string, delayMs = ROOM_TEARDOW
     const anyHumanConnected = room.players.some((p) => !p.isBot && p.connected)
     if (anyHumanConnected) return
     clearBotTimer(room)
+    clearLobbyTeardownTimer(room)
     managerRef?.closeRoom(room.code, reason)
   }, delayMs)
   roomTeardownTimers.set(room.code, timer)
+}
+
+/** Cancel a pending lobby teardown (a human (re)connected or the game started). */
+function clearLobbyTeardownTimer(room: Room): void {
+  const t = lobbyTeardownTimers.get(room.code)
+  if (t) {
+    clearTimeout(t)
+    lobbyTeardownTimers.delete(room.code)
+  }
+}
+
+/**
+ * Lobbies with no connected human can never start (only humans press Start)
+ * and only bots would remain: reap them so they cannot leak forever.
+ */
+function scheduleLobbyTeardown(room: Room): void {
+  clearLobbyTeardownTimer(room)
+  const timer = setTimeout(() => {
+    lobbyTeardownTimers.delete(room.code)
+    if (!managerRef?.hasRoom(room.code) || room.started) return
+    const anyHumanConnected = room.players.some((p) => !p.isBot && p.connected)
+    if (anyHumanConnected) return
+    clearBotTimer(room)
+    managerRef?.closeRoom(room.code, 'abandoned lobby (no humans)')
+  }, LOBBY_ABANDON_MS)
+  lobbyTeardownTimers.set(room.code, timer)
 }
 
 function scheduleBot(room: Room): void {
@@ -608,6 +651,12 @@ function applyMove(room: Room, playerId: string, from: number, to: number): void
       if (p.isBot) {
         broadcastGame(room)
         scheduleBot(room)
+      } else if (p.connected === false) {
+        // The mover vanished mid-move (move timer fired after their socket
+        // died): nobody can answer the prompt — decline on their behalf so
+        // the auction/turn flow continues instead of freezing forever.
+        broadcastGame(room)
+        doBuy(room, p.id, false)
       } else {
         broadcastGame(room)
       }
@@ -658,6 +707,9 @@ function charge(room: Room, p: GamePlayer, amount: number, creditor: GamePlayer 
   pushLog(g, p.color, `${p.name} cannot pay M ${amount} — must raise funds!`)
   broadcastGame(room)
   if (p.isBot) scheduleBot(room)
+  // A disconnected debtor can never act — forfeit immediately so the game
+  // cannot freeze waiting on a seat nobody holds.
+  if (p.connected === false) doDeclareBankrupt(room, p.id)
 }
 
 /** Settle debt from the current cash (called after debtPay or auto liquidation). */
@@ -694,6 +746,9 @@ function drawCard(room: Room, p: GamePlayer, deck: 'chance' | 'community'): void
   } else {
     broadcastGame(room)
   }
+  // A drawer who disconnected mid-move can never press Continue: resolve the
+  // drawn card immediately so the turn keeps flowing.
+  if (!p.isBot && p.connected === false && g.phase === 'event') doEventOk(room, p.id)
 }
 
 /** Resolve the drawn card's effect, then end the turn. */
@@ -780,6 +835,14 @@ function afterTurnAction(room: Room): void {
     g.phase = 'idle'
     g.buyTile = null
     g.eventTile = null
+    // The bonus roll belongs to this player — but a vanished one can never
+    // take it, so hand the turn on instead of freezing on an empty seat.
+    if (p.connected === false && !p.isBot) {
+      nextTurn(room)
+      broadcastGame(room)
+      scheduleBot(room)
+      return
+    }
     broadcastGame(room)
     scheduleBot(room)
     return
@@ -792,6 +855,9 @@ function afterTurnAction(room: Room): void {
 function doJailAction(room: Room, playerId: string, action: 'pay' | 'card' | 'roll'): void {
   const g = room.game
   if (!g || g.winner) return
+  // Runtime guard: the wire is JSON, so an unknown action string must be
+  // rejected — falling through to 'roll' would let a malformed frame roll dice.
+  if (action !== 'pay' && action !== 'card' && action !== 'roll') return
   if (g.phase !== 'jail' && g.phase !== 'idle') return
   const p = g.players[g.current]
   if (!p || p.id !== playerId || !p.inJail) return
@@ -1074,6 +1140,21 @@ function doTradePropose(room: Room, fromId: string, toId: string, payload: Trade
   g.tradeRespondedFrom = false
   pushLog(g, from.color, `${from.name} proposed a trade to ${to.name}`)
   broadcastGame(room)
+  // Offers expire: a proposal to a disconnected player (or a bot, which cannot
+  // respond) must never wedge the trade UI open forever.
+  clearTradeTimer(room)
+  const tradeIdAtSet = g.trade.id
+  const timer = setTimeout(() => {
+    tradeTimers.delete(room.code)
+    const cg = room.game
+    if (!cg || !cg.trade || cg.trade.id !== tradeIdAtSet) return
+    pushLog(cg, '#9aa7c7', 'Trade offer expired')
+    cg.trade = null
+    broadcastGame(room)
+    const cur = cg.players[cg.current]
+    if (cur?.isBot) scheduleBot(room)
+  }, TRADE_TIMEOUT_MS)
+  tradeTimers.set(room.code, timer)
   if (to.isBot) scheduleBot(room)
 }
 
@@ -1082,6 +1163,7 @@ function doTradeRespond(room: Room, playerId: string, accept: boolean): void {
   if (!g || g.winner) return
   const trade = g.trade
   if (!trade) return
+  clearTradeTimer(room)
   const to = g.players.find((p) => p.id === trade.toId)
   const from = g.players.find((p) => p.id === trade.fromId)
   if (!to || !from) {
@@ -1128,6 +1210,7 @@ function doTradeCancel(room: Room, playerId: string): void {
   const g = room.game
   if (!g || !g.trade) return
   if (playerId !== g.trade.fromId && playerId !== g.trade.toId) return
+  clearTradeTimer(room)
   const from = g.players.find((p) => p.id === g.trade?.fromId)
   pushLog(g, from?.color ?? '#9aa7c7', 'Trade cancelled')
   g.trade = null
@@ -1151,7 +1234,8 @@ function openAuction(room: Room, tileIdx: number): void {
     tile: tileIdx,
     highest: 0,
     highestBidder: null,
-    bidder: g.players.find((p) => !p.bankrupt)?.id ?? null,
+    // First eligible participant — never a bankrupt/disconnected seat.
+    bidder: auctionParticipants(g)[0]?.id ?? null,
     passed: [],
     deadline: Date.now() + AUCTION_MS,
     log: [],
@@ -1224,6 +1308,9 @@ function doAuctionPass(room: Room, playerId: string): void {
   const g = room.game
   if (!g || !g.auction) return
   const a = g.auction
+  // Only the player holding the bid window may pass — otherwise anyone could
+  // force-pass on behalf of an opponent (server-authoritative turn order).
+  if (a.bidder !== playerId) return
   const p = g.players.find((pp) => pp.id === playerId)
   if (!p || a.passed.includes(playerId)) return
 
@@ -1353,6 +1440,11 @@ function doDeclareBankrupt(room: Room, playerId: string): void {
     nextTurn(room)
     broadcastGame(room)
     scheduleBot(room)
+  } else {
+    // A completed game accepts no further actions (do* guards check g.winner),
+    // and no timers may outlive it — clear them all now.
+    clearBotTimer(room)
+    clearTradeTimer(room)
   }
 }
 
@@ -1392,6 +1484,7 @@ export class RoomManager {
     const room = this.rooms.get(code)
     if (!room) return
     clearBotTimer(room)
+    clearLobbyTeardownTimer(room)
     for (const p of room.players) {
       this.members.delete(p.id)
       p.send = null
@@ -1482,6 +1575,7 @@ export class RoomManager {
     m.ready = false
     m.color = COLORS[room.players.length % COLORS.length]
     room.players.push(m)
+    clearLobbyTeardownTimer(room)
     log(`room ${code}: ${m.name} joined (${room.players.length}/${MAX_PLAYERS})`)
     broadcastRoom(room)
     return { code }
@@ -1494,6 +1588,10 @@ export class RoomManager {
     if (!room) return { error: 'roomNotFound', message: 'Not in a room' }
     if (room.hostId !== m.id) return { error: 'badPhase', message: 'Only the host can add rivals' }
     if (room.players.length >= MAX_PLAYERS) return { error: 'roomFull', message: 'Room is full' }
+    if (room.started) {
+      // A member added mid-game would never enter game.players — a ghost seat.
+      return { error: 'badPhase', message: 'Cannot add rivals after the game starts' }
+    }
 
     const used = new Set(room.players.map((p) => p.name))
     const name = BOT_NAMES.find((n) => !used.has(n)) ?? `Rival ${room.players.length}`
@@ -1641,7 +1739,9 @@ export class RoomManager {
       if (gp) gp.connected = false
       pushLog(room.game, m.color, `${m.name} disconnected`)
       broadcastGame(room)
-      // If they hold the floor, free the table.
+      // If they hold the floor, free the table — in ANY waiting-on-input phase.
+      // Freeing only 'idle'/'auction' left games frozen forever whenever a
+      // disconnected player sat in buy/event/jail/debt (no one could act).
       if (room.game.players[room.game.current]?.id === m.id) {
         const g = room.game
         if (g.phase === 'idle') {
@@ -1650,6 +1750,18 @@ export class RoomManager {
           scheduleBot(room)
         } else if (g.phase === 'auction' && g.auction) {
           doAuctionPass(room, m.id)
+        } else if (g.phase === 'buy') {
+          doBuy(room, m.id, false) // decline → auction resolves per normal rules
+        } else if (g.phase === 'event') {
+          doEventOk(room, m.id) // resolve the drawn card, then the turn advances
+        } else if (g.phase === 'jail') {
+          // Timers still own 'rolling'/'moving' and finish safely on their own;
+          // jail just needs the turn handed onward.
+          nextTurn(room)
+          broadcastGame(room)
+          scheduleBot(room)
+        } else if (g.phase === 'debt') {
+          doDeclareBankrupt(room, m.id) // cannot pay → seat forfeits assets
         }
       }
       const rt = reapTimers.get(m.id)
@@ -1676,6 +1788,19 @@ export class RoomManager {
     }
   }
 
+  /**
+   * Socket-close cleanup that respects identity rebinds: the closing transport
+   * only triggers leave() if it is still the member's active sink. Without
+   * this, a refresh's old socket (whose close lands AFTER the replacement
+   * socket's hello) would disconnect the freshly re-bound seat.
+   */
+  leaveIfActive(playerId: string, send: SendFn): void {
+    const m = this.members.get(playerId)
+    if (!m) return
+    if (m.send !== send) return // stale transport — a newer connection owns the seat
+    this.leave(playerId)
+  }
+
   private removeMember(m: Member, reason: string): void {
     const room = this.getRoomOf(m)
     if (!room) {
@@ -1694,9 +1819,14 @@ export class RoomManager {
     }
     if (room.players.length === 0) {
       clearBotTimer(room)
+      clearLobbyTeardownTimer(room)
       this.rooms.delete(room.code)
       log(`room ${room.code}: closed (${reason})`)
     } else {
+      // A lobby whose last human is gone can never start (bots never press
+      // Start): reap it after a grace window instead of leaking forever.
+      const anyHumanConnected = room.players.some((p) => !p.isBot && p.connected)
+      if (!room.started && !anyHumanConnected) scheduleLobbyTeardown(room)
       if (room.started && room.game) broadcastGame(room)
       else broadcastRoom(room)
     }
@@ -1705,7 +1835,11 @@ export class RoomManager {
   reconnect(playerId: string, send: SendFn): boolean {
     const m = this.members.get(playerId)
     if (!m || m.isBot) return false
-    if (m.connected && m.send) return false
+    // Identity rebind: the browser may open its replacement socket BEFORE the
+    // old one's close event lands (refresh, network blip). This member is the
+    // newest live connection for the playerId — always rebind the sink instead
+    // of rejecting, or a refresh would lose the game seat to a packet race.
+    const wasConnected = m.connected && m.send != null
     const rt = reapTimers.get(playerId)
     if (rt) {
       clearTimeout(rt)
@@ -1716,6 +1850,7 @@ export class RoomManager {
     this.attachSink(m.id, send)
     const room = this.getRoomOf(m)
     if (!room) return false
+    clearLobbyTeardownTimer(room)
     const gp = room.game?.players.find((gp2) => gp2.id === m.id)
     if (gp) gp.connected = true
     send({ t: 'you', playerId: m.id, name: m.name })
@@ -1727,7 +1862,7 @@ export class RoomManager {
       broadcastRoom(room)
     }
     if (room.game) {
-      pushLog(room.game, '#9aa7c7', `${m.name} reconnected`)
+      pushLog(room.game, '#9aa7c7', wasConnected ? `${m.name} resumed their session` : `${m.name} reconnected`)
       broadcastGame(room)
     }
     log(`room ${room.code}: ${m.name} reconnected`)
@@ -1763,6 +1898,8 @@ export class RoomManager {
     room.started = false
     room.game = null
     clearBotTimer(room) // no stale bot/auction/move timers may survive the reset
+    clearTradeTimer(room)
+    clearLobbyTeardownTimer(room)
     for (const p of room.players) p.ready = p.isHost
     broadcastRoom(room)
     log(`room ${room.code}: reset for another game`)

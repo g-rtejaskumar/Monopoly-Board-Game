@@ -69,9 +69,17 @@ function routeHttp(req: IncomingMessage, res: ServerResponse): void {
 const wss = new WebSocketServer({ noServer: true })
 const server = http.createServer(routeHttp)
 
-// WebSocket upgrade: accept upgrades exactly as before (no path restriction —
-// direct clients use /ws, the Vite dev proxy forwards /boardquest-ws).
+// WebSocket upgrade: accept /ws (direct clients) and /boardquest-ws (the Vite
+// dev proxy forwards that path here). Everything else is rejected before the
+// socket is ever handed to the game layer.
+const WS_PATHS = new Set(['/ws', '/boardquest-ws'])
 server.on('upgrade', (req, socket, head) => {
+  const path = (req.url ?? '/').split('?')[0]
+  if (!WS_PATHS.has(path)) {
+    log(`ws upgrade rejected for path ${path || '(none)'}`)
+    socket.destroy()
+    return
+  }
   wss.handleUpgrade(req, socket as never, head, (ws) => {
     wss.emit('connection', ws, req)
   })
@@ -81,6 +89,9 @@ interface Conn {
   ws: WebSocket
   playerId: string | null
   alive: boolean
+  /** Stable per-connection sink: the manager compares sink identity to detect
+   * stale transports, so this MUST be created once per connection. */
+  sink: (msg: unknown) => void
 }
 
 const connections = new Set<Conn>()
@@ -98,8 +109,10 @@ function send(conn: Conn, msg: unknown): void {
 }
 
 wss.on('connection', (ws: WebSocket) => {
-  const conn: Conn = { ws, playerId: null, alive: true }
+  const conn: Conn = { ws, playerId: null, alive: true, sink: () => {} }
+  conn.sink = (msg: unknown) => send(conn, msg)
   connections.add(conn)
+  log(`ws connected (${connections.size} online)`)
 
   ws.on('message', (data) => {
     let msg: ClientMsg
@@ -108,7 +121,17 @@ wss.on('connection', (ws: WebSocket) => {
     } catch {
       return
     }
-    handle(conn, msg)
+    try {
+      handle(conn, msg)
+    } catch (e) {
+      // A bad frame from one client must never take down the process.
+      log(`handler error for ${conn.playerId ?? 'unknown'}: ${e instanceof Error ? e.message : String(e)}`)
+      try {
+        ws.close()
+      } catch {
+        /* already closing */
+      }
+    }
   })
 
   ws.on('pong', () => {
@@ -117,26 +140,85 @@ wss.on('connection', (ws: WebSocket) => {
 
   ws.on('close', () => {
     connections.delete(conn)
-    if (conn.playerId) manager.leave(conn.playerId)
+    log(`ws disconnected (${connections.size} online)`)
+    // Only the connection that currently OWNS the seat may trigger leave().
+    // A refresh opens the new socket before the old one's close fires; the
+    // stale close must not disconnect the freshly re-bound player.
+    if (conn.playerId) manager.leaveIfActive(conn.playerId, conn.sink)
   })
 
-  ws.on('error', () => {
-    /* socket errors are handled by close */
+  ws.on('error', (err) => {
+    log(`ws error on ${conn.playerId ?? 'new socket'}: ${err.message}`)
+    /* close follows; cleanup happens there */
   })
 })
 
-function handle(conn: Conn, msg: ClientMsg): void {
+/* ------------------------- client message validation ------------------------- */
+
+const NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,20}$/u
+const CODE_RE = /^[A-Z0-9]{1,6}$/
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v)
+}
+
+/** Cheap shape checks before anything reaches the engine. */
+function sanitizeClientMsg(msg: ClientMsg): ClientMsg | null {
+  switch (msg.t) {
+    case 'hello':
+      return typeof msg.name === 'string' && NAME_RE.test(msg.name.trim()) ? msg : null
+    case 'join':
+      return typeof msg.code === 'string' && CODE_RE.test(msg.code.toUpperCase()) ? msg : null
+    case 'ready':
+      return typeof msg.ready === 'boolean' ? msg : null
+    case 'build':
+    case 'sellBuilding':
+    case 'mortgage':
+    case 'unmortgage':
+      return Number.isInteger(msg.tile) && msg.tile >= 0 && msg.tile < 40 ? msg : null
+    case 'jailAction':
+      return msg.action === 'pay' || msg.action === 'card' || msg.action === 'roll' ? msg : null
+    case 'auctionBid':
+      return isFiniteNumber(msg.amount) ? msg : null
+    case 'tradePropose': {
+      const okCash = isFiniteNumber(msg.giveCash) && isFiniteNumber(msg.getCash)
+      const okTiles =
+        Array.isArray(msg.giveTiles) &&
+        Array.isArray(msg.getTiles) &&
+        msg.giveTiles.concat(msg.getTiles).every((n) => Number.isInteger(n) && n >= 0 && n < 40)
+      return okCash && okTiles ? msg : null
+    }
+    case 'chat':
+      return typeof msg.text === 'string' ? msg : null
+    default:
+      return msg
+  }
+}
+
+function handle(conn: Conn, raw: ClientMsg): void {
+  const msg = sanitizeClientMsg(raw)
+  if (!msg) {
+    // Failed hello shapes get their specific code so the client UI can explain;
+    // everything else is a generic rejection. Nothing is silently swallowed.
+    send(conn, {
+      t: 'err',
+      code: raw.t === 'hello' ? 'badName' : 'badPhase',
+      message: raw.t === 'hello' ? 'Name must be 2–20 letters, numbers or spaces.' : 'That action was not understood by the server.',
+    })
+    return
+  }
   switch (msg.t) {
     case 'hello': {
       if (conn.playerId) return
       const name = String(msg.name ?? '')
-      // Reconnect path: client presents a previous playerId.
-      if (msg.playerId && manager.reconnect(String(msg.playerId), (m) => send(conn, m))) {
+      // Reconnect path: client presents a previous playerId. If the old socket
+      // is still winding down, this rebinds the seat onto THIS connection.
+      if (msg.playerId && manager.reconnect(String(msg.playerId), conn.sink)) {
         conn.playerId = String(msg.playerId)
         log(`reconnected player ${conn.playerId}`)
         return
       }
-      const res = manager.hello(name, (m) => send(conn, m))
+      const res = manager.hello(name, conn.sink)
       if ('error' in res) {
         send(conn, { t: 'err', code: res.error, message: res.message })
         return
@@ -225,12 +307,12 @@ function handle(conn: Conn, msg: ClientMsg): void {
     case 'tradePropose': {
       if (!conn.playerId) return
       manager.tradePropose(conn.playerId, String(msg.to ?? ''), {
-        giveCash: Number(msg.giveCash ?? 0),
-        getCash: Number(msg.getCash ?? 0),
+        giveCash: Math.trunc(Number(msg.giveCash ?? 0)),
+        getCash: Math.trunc(Number(msg.getCash ?? 0)),
         giveTiles: Array.isArray(msg.giveTiles) ? msg.giveTiles.map(Number) : [],
         getTiles: Array.isArray(msg.getTiles) ? msg.getTiles.map(Number) : [],
-        giveJailCards: Number(msg.giveJailCards ?? 0),
-        getJailCards: Number(msg.getJailCards ?? 0),
+        giveJailCards: Math.trunc(Number(msg.giveJailCards ?? 0)),
+        getJailCards: Math.trunc(Number(msg.getJailCards ?? 0)),
       })
       return
     }
@@ -246,7 +328,7 @@ function handle(conn: Conn, msg: ClientMsg): void {
     }
     case 'auctionBid': {
       if (!conn.playerId) return
-      manager.auctionBid(conn.playerId, Number(msg.amount ?? 0))
+      manager.auctionBid(conn.playerId, Math.trunc(Number(msg.amount ?? 0)))
       return
     }
     case 'auctionPass': {
@@ -292,7 +374,7 @@ const INTERVAL = Math.max(5_000, Number(process.env.BQ_HEARTBEAT_MS || 30_000))
 let heartbeatTimer: NodeJS.Timeout | null = setInterval(() => {
   for (const conn of connections) {
     if (!conn.alive) {
-      conn.ws.terminate() // 'close' fires → connections.delete + manager.leave cleanup
+      conn.ws.terminate() // 'close' fires → connections.delete + manager cleanup
       continue
     }
     conn.alive = false
@@ -305,6 +387,16 @@ server.listen(PORT, HOST, () => {
   log(`health endpoint: http://${HOST}:${PORT}/health`)
   log(process.env.PORT ? `using PORT from environment (${PORT})` : 'PORT not set — dev default 8787')
   log('WebSocket path: /ws (the Vite dev proxy also forwards /boardquest-ws here)')
+})
+
+/* --------------------------------- error guards -------------------------------- */
+// An unhandled rejection must log loudly, but a single slipped throw should not
+// take down every live room on a busy server.
+process.on('uncaughtException', (err) => {
+  log(`uncaughtException: ${err.stack ?? err.message}`)
+})
+process.on('unhandledRejection', (reason) => {
+  log(`unhandledRejection: ${reason instanceof Error ? reason.stack : String(reason)}`)
 })
 
 /* ------------------------------ graceful shutdown ------------------------------ */

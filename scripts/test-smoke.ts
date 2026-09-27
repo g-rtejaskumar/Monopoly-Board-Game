@@ -25,8 +25,10 @@ import type { ClientMsg, ServerMsg, GameSnapshot } from '../src/net/protocol'
 
 const BOARD_SIZE = 40
 const MIN_HUMAN_TURNS = 10
-// Play budget + seat-grace/teardown wait (~75s) + margin must fit inside this.
-const GLOBAL_TIMEOUT_MS = 300_000
+// Two scripted games (300s + 150s budgets) + seat-grace/teardown wait (~80s) + margin.
+// Turn pace is ~8–13s (move animation + jittered bot actions + jail chains),
+// so 10 human turns can legitimately need >4 minutes on a loaded machine.
+const GLOBAL_TIMEOUT_MS = 620_000
 
 let passed = 0
 let failed = 0
@@ -274,7 +276,9 @@ async function main(): Promise<void> {
   })
 
   try {
-    await waitForPort(port)
+    // 30s: npx cold-start on Windows can resolve tsx slowly; the server itself
+    // binds in under a second once node is up (verified by test-deploy).
+    await waitForPort(port, 30_000)
     check('server boots for smoke test', true)
 
     // 1) connect + handshake
@@ -320,7 +324,7 @@ async function main(): Promise<void> {
     let lastIdleAt = 0
     const debtAttempts = new Map<string, number>()
     let lastDebtKey = ''
-    const deadline = Date.now() + (GLOBAL_TIMEOUT_MS - 100_000)
+    const deadline = Date.now() + 300_000
 
     const onSnapshot = (g: GameSnapshot): void => {
       // Invariants on every change, but reported at most once per turn.
@@ -422,6 +426,152 @@ async function main(): Promise<void> {
     }
     const botLog = final?.log.filter((l) => l.text.includes(botName)).length ?? 0
     check('bot actions are logged', botLog > 0, `${botLog} entries`)
+
+    /* ---------------- scenario 2: human + TWO bots, fresh room ---------------- */
+    // A brand-new room must start completely clean while game 1 still exists
+    // elsewhere in the same process — this is the state-leakage probe.
+    console.log('[diag] scenario 2: human + 2 bots in a fresh room')
+    const bob = new Bot(`ws://127.0.0.1:${port}/ws`)
+    bob.send({ t: 'hello', name: 'SmokeBob' })
+    await bob.waitFor((m) => m.t === 'you', 8000)
+    bob.send({ t: 'create' })
+    await bob.waitFor((m) => m.t === 'created', 8000)
+    bob.send({ t: 'addBot' })
+    await bob.waitFor((m) => m.t === 'room' && m.room.players.filter((p) => p.isBot).length === 1, 8000)
+    bob.send({ t: 'addBot' })
+    await bob.waitFor((m) => m.t === 'room' && m.room.players.filter((p) => p.isBot).length === 2, 8000)
+    check('two bots join the second room', true)
+    bob.send({ t: 'ready', ready: true })
+    bob.send({ t: 'start' })
+    const started2 = await bob.waitFor((m) => m.t === 'started', 10_000)
+    if (started2.t !== 'started') throw new Error('scenario 2 failed to start')
+    const g2start = started2.game
+    check(
+      'second game starts clean (turn 1, no ownership, full cash) — no leakage from game 1',
+      g2start.players.length === 3 &&
+        g2start.turn === 1 &&
+        g2start.current === 0 &&
+        Object.keys(g2start.owned).length === 0 &&
+        g2start.players.every((p) => p.cash === 1500),
+      `turn=${g2start.turn} owned=${Object.keys(g2start.owned).length} cash=${g2start.players.map((p) => p.cash).join(',')}`,
+    )
+    // Ghost-seat protection: members added mid-game never enter game.players.
+    bob.send({ t: 'addBot' })
+    const addBotErr = await bob.waitFor((m) => m.t === 'err', 5000).catch(() => null)
+    check('addBot after game start is rejected cleanly', addBotErr?.t === 'err')
+
+    const MIN_TURNS_2 = 5
+    let humanTurns2 = 0
+    let lastRolledTurn2 = -1
+    let lastIdleAt2 = 0
+    let winnerSeen2: string | null = null
+    let invFailures2 = 0
+    let lastInvSummary2 = ''
+    const debtAttempts2 = new Map<string, number>()
+    let lastDebtKey2 = ''
+    const deadline2 = Date.now() + 150_000
+    const onSnapshot2 = (g: GameSnapshot): void => {
+      const before = failures.length
+      verifyInvariantsQuiet(g)
+      if (failures.length > before) {
+        invFailures2++
+        lastInvSummary2 = failures[failures.length - 1] ?? ''
+        failures.pop()
+      }
+      if (g.winner && winnerSeen2 == null) winnerSeen2 = g.winner
+      if (Date.now() >= deadline2 || winnerSeen2 != null) return
+      const p = g.players[g.current]
+      if (!p || p.isBot) return
+      if (g.phase === 'idle' && humanTurns2 < MIN_TURNS_2) {
+        if (g.turn !== lastRolledTurn2 || Date.now() - lastIdleAt2 > 4000) {
+          if (g.turn !== lastRolledTurn2) humanTurns2++
+          lastRolledTurn2 = g.turn
+          lastIdleAt2 = Date.now()
+          bob.send({ t: 'roll' })
+        }
+      } else if (g.phase === 'buy') {
+        bob.send({ t: 'buy', accept: p.cash > 400 })
+      } else if (g.phase === 'event') {
+        bob.send({ t: 'eventOk' })
+      } else if (g.phase === 'jail') {
+        bob.send({ t: 'jailAction', action: 'roll' })
+      } else if (g.phase === 'debt' && g.debt?.debtorId === bob.playerId) {
+        // Same pattern as scenario 1: after two failed pay attempts on the same
+        // debt, declare bankruptcy so a pending-debt quirk cannot stall us.
+        const key = `${g.debt.amount}@${g.debt.creditorId}@${g.turn}`
+        if (key !== lastDebtKey2) {
+          lastDebtKey2 = key
+          debtAttempts2.set(key, (debtAttempts2.get(key) ?? 0) + 1)
+          const tries = debtAttempts2.get(key) ?? 1
+          bob.send({ t: g.debt.canPay && tries <= 2 ? 'debtPay' : 'declareBankrupt' })
+        }
+      } else if (g.phase === 'auction' && g.auction?.bidder === bob.playerId) {
+        bob.send({ t: 'auctionPass' })
+      }
+    }
+    // Replay only THIS game's messages (the inbox holds nothing older — bob is fresh).
+    lastTurn = 0 // per-game invariant counters restart with the new game
+    lastCurrent = -1
+    client.inbox // (alice's stream — untouched; scenario 2 only pumps bob)
+    bob.inbox.forEach((m) => {
+      if (m.t === 'started' || m.t === 'state') onSnapshot2(m.game)
+    })
+    const offPump2 = bob.pumpAll((m) => {
+      if (m.t === 'started' || m.t === 'state') onSnapshot2(m.game)
+    })
+    const watchdog2 = setInterval(() => {
+      const g = bob.latestGame()
+      if (g) onSnapshot2(g)
+    }, 2500)
+    await waitUntil(
+      () => humanTurns2 >= MIN_TURNS_2 || winnerSeen2 != null || Date.now() >= deadline2,
+      155_000,
+    )
+    clearInterval(watchdog2)
+    offPump2()
+
+    const fg2 = bob.latestGame()
+    console.log(
+      `[diag] scenario 2 ended: turns=${humanTurns2} winner=${winnerSeen2 ?? 'none'} phase=${fg2?.phase ?? '?'} turn=${fg2?.turn ?? '?'}`,
+    )
+    check(
+      `second game: at least ${MIN_TURNS_2} human turns with 2 bots (no freeze)`,
+      humanTurns2 >= MIN_TURNS_2 || winnerSeen2 != null,
+      `got ${humanTurns2}`,
+    )
+    check('second game invariants held across all snapshots', invFailures2 === 0, lastInvSummary2 || 'all snapshots verified')
+
+    // Consecutive-game leakage: when a winner occurred, Play Again must reset
+    // to a pristine lobby and the next game must start clean.
+    if (winnerSeen2 != null) {
+      bob.send({ t: 'playAgain' })
+      await bob.waitFor((m) => m.t === 'room' && !m.room.started, 8000).catch(() => null)
+      const resetRoom = bob.inbox.filter((m) => m.t === 'room').at(-1)
+      const resetOk = resetRoom?.t === 'room' && !resetRoom.room.started
+      check('play again resets the finished game to a clean lobby', Boolean(resetOk))
+      bob.send({ t: 'ready', ready: true })
+      bob.send({ t: 'start' })
+      const started3 = await bob.waitFor((m) => m.t === 'started', 10_000).catch(() => null)
+      const g3 = started3?.t === 'started' ? started3.game : null
+      check(
+        'third game (after play again) starts with pristine state',
+        Boolean(
+          g3 &&
+            g3.turn === 1 &&
+            Object.keys(g3.owned).length === 0 &&
+            g3.players.every((p) => p.cash === 1500 && !p.bankrupt),
+        ),
+      )
+      // Leave the fresh game cleanly so teardown can reclaim the room later.
+      bob.send({ t: 'leaveRoom' })
+      await sleep(300)
+    } else {
+      check(
+        'no leakage signs without a finished game (invariants + cash floors held)',
+        invFailures2 === 0,
+      )
+    }
+    bob.close()
 
     // 11) clean disconnect: mid-game leave holds the seat for a grace window…
     const oldId = alice.playerId

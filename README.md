@@ -394,3 +394,63 @@ Important caveats:
 - Bot/demo mode preserved ✅
 
 Next: rent & trading, win conditions, spectator mode, and persistent rooms (database).
+
+# BoardQuest Launch Checklist
+
+Concise pre-launch gate. Every line below applies to the **existing** MVP — no new
+infrastructure required.
+
+## Before every deployment
+
+- [ ] `npm run build` passes (client + server typecheck + Vite build)
+- [ ] `npm test` passes (protocol + deploy + smoke suites)
+- [ ] Production WebSocket URL verified: bundle contains exactly
+      `wss://monopoly-board-game.onrender.com/ws` (grep `dist/assets/*.js`)
+- [ ] Health endpoint verified locally: `GET /health` → HTTP 200 `{ok:true,...}`
+- [ ] No secrets committed: `git status` shows no `.env`, `.env.local`, or
+      `.env.production`; only `.env*.example` files are tracked
+
+## After Render deployment
+
+- [ ] `GET https://monopoly-board-game.onrender.com/health` returns **HTTP 200**
+      with `{"ok":true,"service":"boardquest-server","status":"healthy",...}`
+- [ ] WebSocket handshake passes: `npm run check:prod` (or any wss client) gets a
+      `playerId` on `/ws`
+- [ ] Render logs show the listening port and **no startup errors**
+- [ ] Free-tier note: the first request after ~15 min idle may cold-start (~50s);
+      keep the UptimeRobot monitor pointed at `/health` to stay warm
+
+## After Vercel deployment
+
+- [ ] Frontend loads at the Vercel URL (no blank page, no console errors)
+- [ ] Connection status becomes **Connected** (lobby shows "● live")
+- [ ] **Create room** works and shows a 6-character code
+- [ ] **Bot game** works: add a practice rival, start, roll, take a full turn
+- [ ] Hard refresh on `/lobby/CODE` and `/play/CODE` re-enters the same room
+
+## Multiplayer test (two humans, two browsers)
+
+- [ ] Two humans join the same room (one creates, one joins by code)
+- [ ] Both see the same game state: roster, cash, dice, positions, turn banner
+- [ ] Turns synchronize: exactly one "Your turn — roll the dice!" banner at a time
+- [ ] Chat works both directions
+- [ ] Trading works: propose → accept → deed and cash move
+- [ ] Game completes correctly: winner screen shows once, Play Again resets to a
+      clean lobby for both players
+
+## Monitoring
+
+- [ ] UptimeRobot (or equivalent) health monitor is **green** on
+      `https://monopoly-board-game.onrender.com/health`
+- [ ] Monitor is HTTP-only (it must not depend on WebSocket connectivity)
+- [ ] Alert on 2+ consecutive failures; free tier's 5-minute interval is enough
+
+## When something looks wrong
+
+- Server down / cold start → lobby banner shows "Can't reach the game server" with a
+  Retry button; the game page shows "Reconnecting to the table…"
+- A player vanished mid-game → their seat shows "reconnecting…" for 60s; if they
+  don't come back the server frees their seat automatically (game never stalls)
+- Room gone after a server restart → the game page says "This game table is no
+  longer available" instead of faking a practice table — start a fresh room
+- Detailed troubleshooting lives in [Deploy BoardQuest](#deploy-boardquest) above
