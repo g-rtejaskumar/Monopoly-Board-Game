@@ -1,8 +1,8 @@
 /**
  * BoardQuest realtime server.
  *
- *   GET /health   → lightweight JSON liveness probe (no auth, no secrets)
- *   GET /         → simple JSON identity response
+ *   GET|HEAD /health → lightweight liveness probe (no auth, no secrets)
+ *   GET|HEAD /       → simple JSON identity response
  *   WS   /ws      → realtime game socket (the Vite dev proxy also forwards /boardquest-ws)
  *
  * One HTTP server hosts both the JSON routes and the WebSocket upgrade —
@@ -43,25 +43,34 @@ function healthPayload(): Record<string, unknown> {
   }
 }
 
+/**
+ * Write a JSON response. HEAD is served exactly like GET (same status + headers,
+ * including content-length) but with no body, as RFC 9110 requires — this is what
+ * lets UptimeRobot's free HTTP monitor, which sends HEAD, keep working.
+ */
+function sendJson(res: ServerResponse, status: number, payload: unknown, headOnly: boolean): void {
+  const body = JSON.stringify(payload)
+  res.writeHead(status, { ...JSON_HEADERS, 'content-length': Buffer.byteLength(body) })
+  res.end(headOnly ? undefined : body)
+}
+
 function routeHttp(req: IncomingMessage, res: ServerResponse): void {
   const path = (req.url ?? '/').split('?')[0]
-  if (req.method !== 'GET') {
-    res.writeHead(405, JSON_HEADERS)
-    res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }))
+  const method = req.method ?? 'GET'
+  const headOnly = method === 'HEAD'
+  if (method !== 'GET' && !headOnly) {
+    sendJson(res, 405, { ok: false, error: 'method_not_allowed' }, false)
     return
   }
   if (path === '/health') {
-    res.writeHead(200, JSON_HEADERS)
-    res.end(JSON.stringify(healthPayload()))
+    sendJson(res, 200, healthPayload(), headOnly)
     return
   }
   if (path === '/') {
-    res.writeHead(200, JSON_HEADERS)
-    res.end(JSON.stringify({ service: 'boardquest-server', status: 'running' }))
+    sendJson(res, 200, { service: 'boardquest-server', status: 'running' }, headOnly)
     return
   }
-  res.writeHead(404, JSON_HEADERS)
-  res.end(JSON.stringify({ ok: false, error: 'not_found' }))
+  sendJson(res, 404, { ok: false, error: 'not_found' }, headOnly)
 }
 
 /* ---------------------------------- servers ------------------------------------ */

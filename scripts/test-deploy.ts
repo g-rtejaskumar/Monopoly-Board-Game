@@ -7,6 +7,7 @@
  *  2. URL resolution: production build without VITE_WS_URL -> config error
  *      (never a silent dev-proxy dial); dev keeps the documented proxy fallback.
  *   3. `npm start` boots with a custom PORT, binds 0.0.0.0, logs the port,
+ *      answers GET /health (JSON) and HEAD /health (200, no body — UptimeRobot),
  *      answers a WebSocket handshake on /ws, and shuts down cleanly on SIGTERM.
  *   4. Production bundle hygiene: no `localhost:8787`, no accidental `ws://localhost`.
  *   5. SPA routes return the app shell (direct navigation + refresh).
@@ -163,6 +164,42 @@ async function testServerLifecycle(): Promise<void> {
     '/health exposes no secrets, rooms, players or env vars',
     !/port|env|room|player|token|key|secret|password/i.test(JSON.stringify(healthJson)),
   )
+
+  // UptimeRobot's free HTTP monitor sends HEAD instead of GET: it must get the
+  // same 200 + headers as GET, with no body.
+  interface Probe {
+    status: number
+    body: string
+    headers: http.IncomingHttpHeaders
+  }
+  const probe = (method: 'GET' | 'HEAD', path: string): Promise<Probe> =>
+    new Promise<Probe>((resolve) => {
+      const req = http.request(`http://127.0.0.1:${port}${path}`, { method }, (res) => {
+        let body = ''
+        res.on('data', (c) => (body += c.toString()))
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body, headers: res.headers }))
+      })
+      req.on('error', () => resolve({ status: 0, body: '', headers: {} }))
+      req.end()
+    })
+  const getProbe = await probe('GET', '/health')
+  const head = await probe('HEAD', '/health')
+  check('HEAD /health returns HTTP 200 (UptimeRobot compatibility)', head.status === 200)
+  check('HEAD /health returns no body', head.body === '')
+  check(
+    'HEAD /health sends the same JSON headers as GET',
+    head.headers['content-type'] === getProbe.headers['content-type'] &&
+      head.headers['cache-control'] === getProbe.headers['cache-control'] &&
+      head.headers['content-length'] === getProbe.headers['content-length'] &&
+      head.headers['content-length'] === String(Buffer.byteLength(getProbe.body)),
+    `content-type=${head.headers['content-type']} content-length=${head.headers['content-length']}`,
+  )
+  check(
+    'HEAD /health exposes no secrets either',
+    !/port|env|room|player|token|key|secret|password/i.test(JSON.stringify(head.headers)),
+  )
+  const headRoot = await probe('HEAD', '/')
+  check('HEAD / matches GET / (200, no body)', headRoot.status === 200 && headRoot.body === '')
 
   // Root endpoint identity response.
   const root = await new Promise<{ status: number; body: string }>((resolve) => {
