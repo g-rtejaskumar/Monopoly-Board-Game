@@ -1,12 +1,26 @@
 /**
  * A BoardStore implementation driven by authoritative server snapshots.
- * Preserves the get/set/subscribe interface the 3D scene expects while
- * deriving animations from the server's two-broadcast flow:
- *   1) roll broadcast (phase 'rolling', pawns not yet moved) -> dice animation
- *   2) landing broadcast (tile/cash/buy/event/turn applied) -> pawn hop
+ *
+ * Movement is a *view* of server state, never a replacement for it:
+ *
+ *   roll broadcast   (phase 'rolling', pawns not yet moved) -> dice animation
+ *   landing broadcast(phase 'buy'|'event'|'jail'|'auction'|'debt'|'idle')
+ *                                                           -> pawn hop
+ *
+ * Design rules that keep the pawn and the server in agreement:
+ *   1. `latest` always holds the newest authoritative snapshot, and every
+ *      rendered value is re-derived from it — no incremental merging, so a
+ *      snapshot arriving mid-animation can never leave stale local state behind.
+ *   2. A hop is only in flight while `anim` is set. When it ends, the store
+ *      falls back to the snapshot's own tile, so the pawn ALWAYS eventually
+ *      equals the authoritative position (never left at GO).
+ *   3. The hop ends when the server confirms the destination tile (plus a
+ *      safety timer), and `phase` returns to 'idle' with it — so a turn can
+ *      never appear stuck at "X is moving…" for the next player.
  */
 import { PLAYER_COLORS } from '../game/types'
 import type { PlayerColor } from '../game/types'
+import { BOARD_SIZE } from './protocol'
 import type { GameSnapshot, GamePlayer } from './protocol'
 
 export interface BoardPlayer {
@@ -26,6 +40,17 @@ export interface BoardPlayer {
 
 export type BoardPhase = 'idle' | 'rolling' | 'moving'
 
+/** A pawn hop in progress: an interpolation between two authoritative tiles. */
+export interface BoardMoveAnim {
+  seat: number
+  from: number
+  to: number
+  /** Date.now() when the hop starts (after the dice settle). */
+  start: number
+  /** Hop duration in ms — the 3D pawn derives its progress from it. */
+  dur: number
+}
+
 export interface BoardStateShape {
   players: BoardPlayer[]
   current: number
@@ -33,7 +58,7 @@ export interface BoardStateShape {
   dice: [number, number]
   rollTrigger: number
   rolledAt: number
-  moveAnim: { seat: number; from: number; to: number; start: number } | null
+  moveAnim: BoardMoveAnim | null
   last: { diceTotal: number; seat: number } | null
   eventTile: number | null
   buyTile: number | null
@@ -50,6 +75,57 @@ export interface BoardStoreShape {
   get: () => BoardStateShape
   set: (fn: (s: BoardStateShape) => void) => void
   subscribe: (l: () => void) => () => void
+}
+
+/* ------------------------------ animation timing ------------------------------ */
+// These mirror the server's move schedule (rooms.ts rollAndMove) so the local
+// hop finishes at the same moment the landing snapshot is published.
+
+/** Dice tumble before the pawn starts hopping. */
+const ROLL_SETTLE_MS = 1150
+const HOP_BASE_MS = 260
+const HOP_PER_TILE_MS = 150
+/** Safety net: never hold a hop open longer than its duration plus this. */
+const HOP_GRACE_MS = 4000
+/** Window in which a confirmed hop suppresses a duplicate sync-hop. */
+const HOP_DEDUPE_MS = 10_000
+
+/**
+ * Browser timers, resolved through globalThis so this module needs no DOM lib
+ * types — the server typecheck and the Node regression suite both import it. In
+ * the app it is simply `window`.
+ */
+interface TimerHost {
+  setTimeout: (fn: () => void, ms?: number) => number
+  clearTimeout: (id: number) => void
+}
+function timerHost(): TimerHost {
+  const g = globalThis as unknown as { window?: TimerHost }
+  return g.window ?? (globalThis as unknown as TimerHost)
+}
+
+function hopDuration(from: number, to: number): number {
+  const steps = to >= from ? to - from : to + BOARD_SIZE - from
+  return HOP_BASE_MS + steps * HOP_PER_TILE_MS
+}
+
+function emptyState(): BoardStateShape {
+  return {
+    players: [],
+    current: 0,
+    phase: 'idle',
+    dice: [1, 1],
+    rollTrigger: 0,
+    rolledAt: 0,
+    moveAnim: null,
+    last: null,
+    eventTile: null,
+    buyTile: null,
+    owned: {},
+    buildings: {},
+    mortgaged: {},
+    log: [],
+  }
 }
 
 function asColor(hex: string): PlayerColor {
@@ -122,30 +198,24 @@ export function createNetBoardStore(): {
     subs.forEach((l) => l())
   }
 
+  /** Newest authoritative snapshot — the single source of truth for the board. */
+  let latest: GameSnapshot | null = null
   let lastRollId = -1
-  let moveTimer: number | null = null
-  let animating: { seat: number; from: number; to: number } | null = null
+  let rollTrigger = 0
+  let last: { diceTotal: number; seat: number } | null = null
+
+  /** In-flight hop. One at a time: the game moves exactly one pawn per turn. */
+  let anim: (BoardMoveAnim & { stage: 'rolling' | 'moving' }) | null = null
+  let settleTimer: number | null = null
+  let graceTimer: number | null = null
+  /** The tile each pawn is visually standing on, keyed by seat. */
+  const rendered = new Map<number, number>()
+  /** Last hop we finished, so a late landing snapshot cannot replay it. */
+  let finishedHop: { seat: number; to: number; at: number } | null = null
 
   const store: BoardStoreShape = {
     get: () => {
-      if (!state) {
-        state = {
-          players: [],
-          current: 0,
-          phase: 'idle',
-          dice: [1, 1],
-          rollTrigger: 0,
-          rolledAt: 0,
-          moveAnim: null,
-          last: null,
-          eventTile: null,
-          buyTile: null,
-          owned: {},
-          buildings: {},
-          mortgaged: {},
-          log: [],
-        }
-      }
+      if (!state) state = emptyState()
       return state
     },
     set: (fn) => {
@@ -161,92 +231,157 @@ export function createNetBoardStore(): {
     },
   }
 
-  function clearMoveTimer(): void {
-    if (moveTimer !== null) {
-      window.clearTimeout(moveTimer)
-      moveTimer = null
+  function clearTimers(): void {
+    const timers = timerHost()
+    if (settleTimer !== null) {
+      timers.clearTimeout(settleTimer)
+      settleTimer = null
+    }
+    if (graceTimer !== null) {
+      timers.clearTimeout(graceTimer)
+      graceTimer = null
+    }
+  }
+
+  /**
+   * Re-derive the whole visual state from `latest`. Deriving instead of merging
+   * is what makes an animation and an interleaved snapshot deterministic: the
+   * authoritative values are always the ones the server last sent, and only the
+   * in-flight hop is layered on top.
+   */
+  function buildState(): BoardStateShape {
+    if (!latest) return emptyState()
+    const next = fromSnapshot(latest)
+    next.rollTrigger = rollTrigger
+    next.last = last
+    if (anim) {
+      next.phase = anim.stage
+      next.moveAnim =
+        anim.stage === 'moving'
+          ? { seat: anim.seat, from: anim.from, to: anim.to, start: anim.start, dur: anim.dur }
+          : null
+    } else {
+      next.phase = 'idle'
+      next.moveAnim = null
+    }
+    for (const p of next.players) {
+      rendered.set(p.seat, anim && anim.seat === p.seat ? anim.to : p.tile)
+    }
+    return next
+  }
+
+  function emit(): void {
+    state = buildState()
+    notify()
+  }
+
+  /** End the in-flight hop: from here the pawn sits on the authoritative tile. */
+  function finishAnim(): void {
+    if (!anim) return
+    const done = anim
+    clearTimers()
+    anim = null
+    finishedHop = { seat: done.seat, to: done.to, at: Date.now() }
+    emit()
+  }
+
+  function armGrace(): void {
+    const timers = timerHost()
+    if (graceTimer !== null) timers.clearTimeout(graceTimer)
+    const wait = (anim?.dur ?? 0) + HOP_GRACE_MS
+    graceTimer = timers.setTimeout(() => {
+      graceTimer = null
+      finishAnim()
+    }, wait)
+  }
+
+  /**
+   * Start hopping a pawn from `from` to `to`. `settleMs` is the dice tumble that
+   * precedes the hop for a real roll; server-driven syncs (card moves, jail,
+   * a roll we missed) hop immediately.
+   */
+  function runHop(seat: number, from: number, to: number, settleMs: number, withDice: boolean): void {
+    clearTimers()
+    anim = {
+      seat,
+      from,
+      to,
+      start: Date.now() + settleMs,
+      dur: hopDuration(from, to),
+      stage: withDice ? 'rolling' : 'moving',
+    }
+    emit()
+    if (settleMs > 0) {
+      settleTimer = timerHost().setTimeout(() => {
+        settleTimer = null
+        if (!anim) return
+        anim.stage = 'moving'
+        anim.start = Date.now()
+        emit()
+        armGrace()
+      }, settleMs)
+    } else {
+      armGrace()
     }
   }
 
   function onServerMsg(g: GameSnapshot): void {
-    const prev = state
-
-    // First snapshot ever: adopt as-is.
-    if (!prev) {
-      state = fromSnapshot(g)
-      lastRollId = g.rollId
-      notify()
-      return
-    }
+    const previous = latest
+    latest = g
 
     const isNewRoll = g.rollId !== lastRollId && g.phase === 'rolling'
+    lastRollId = g.rollId
 
     if (isNewRoll) {
-      // Dice broadcast: pawns have not moved yet in this snapshot.
-      lastRollId = g.rollId
-      const current = g.players[g.current]
-      const seat = current ? current.seat : 0
-      const mover = prev.players.find((p) => p.seat === seat)
-      const from = mover ? mover.tile : 0
-      const total = (g.dice[0] || 1) + (g.dice[1] || 1)
-      const to = (from + total) % 40
-
-      const next = fromSnapshot(g)
-      next.phase = 'rolling'
-      next.rollTrigger = prev.rollTrigger + 1
-      next.rolledAt = Date.now()
-      next.last = { diceTotal: total, seat }
-      next.moveAnim = null
-      state = next
-      notify()
-
-      // Animate the pawn locally after the dice settle. The server landing
-      // snapshot will confirm the final tile shortly after the hop finishes.
-      clearMoveTimer()
-      animating = { seat, from, to }
-      moveTimer = window.setTimeout(() => {
-        moveTimer = null
-        if (!state || !animating) return
-        state.phase = 'moving'
-        state.moveAnim = {
-          seat: animating.seat,
-          from: animating.from,
-          to: animating.to,
-          start: Date.now(),
-        }
-        notify()
-      }, 1150)
-      return
-    }
-
-    if (g.rollId !== lastRollId) {
-      // A roll we missed (e.g. reconnect): adopt the snapshot without animation.
-      lastRollId = g.rollId
-      clearMoveTimer()
-      animating = null
-      state = fromSnapshot(g)
-      notify()
-      return
-    }
-
-    // Same roll: landing/resolution snapshot. Confirm pawn position and merge.
-    const next = fromSnapshot(g)
-    if (animating) {
-      const target = animating
-      const mover = next.players.find((p) => p.seat === target.seat)
-      if (mover && mover.tile === target.to) {
-        // Preserve the in-flight hop so visuals stay smooth until it completes.
-        next.moveAnim = prev.moveAnim
-        next.phase = prev.phase === 'moving' || prev.phase === 'rolling' ? prev.phase : next.phase
-      } else {
-        animating = null
+      const mover = g.players[g.current]
+      if (mover) {
+        const from = mover.tile
+        const total = (g.dice[0] || 1) + (g.dice[1] || 1)
+        const to = (from + total) % BOARD_SIZE
+        rollTrigger += 1
+        last = { diceTotal: total, seat: mover.seat }
+        runHop(mover.seat, from, to, ROLL_SETTLE_MS, true)
+        return
       }
     }
-    if (moveTimer !== null && prev.phase === 'rolling') {
-      next.phase = 'rolling'
+
+    if (anim) {
+      const owner = g.players.find((p) => p.seat === anim?.seat)
+      if (owner) {
+        // The server moved this pawn somewhere other than where the hop was
+        // heading (Go To Jail, a card that relocates): hop on to the REAL tile.
+        if (owner.tile !== anim.from && owner.tile !== anim.to) {
+          runHop(anim.seat, anim.to, owner.tile, 0, false)
+          return
+        }
+        // Destination confirmed and the hop has played out → release the state
+        // so `phase` returns to 'idle' and the next player can act.
+        if (owner.tile === anim.to && anim.stage === 'moving' && Date.now() - anim.start >= anim.dur) {
+          finishAnim()
+          return
+        }
+      }
+    } else if (previous) {
+      // No roll involved, yet a pawn is standing somewhere new (card movement,
+      // jail, or a roll broadcast we missed while reconnecting). Animate it so
+      // every client eventually shows the authoritative position.
+      for (const p of g.players) {
+        const shown = rendered.get(p.seat)
+        if (shown === undefined || shown === p.tile) continue
+        if (
+          finishedHop &&
+          finishedHop.seat === p.seat &&
+          finishedHop.to === p.tile &&
+          Date.now() - finishedHop.at < HOP_DEDUPE_MS
+        ) {
+          break // this move was already animated by the hop that just finished
+        }
+        runHop(p.seat, shown, p.tile, 0, false)
+        return
+      }
     }
-    state = next
-    notify()
+
+    emit()
   }
 
   return { store, onServerMsg }

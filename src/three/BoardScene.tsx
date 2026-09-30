@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useReducer } from 'react'
+import { useEffect, useMemo, useRef, useReducer, useState } from 'react'
 import * as THREE from 'three'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import {
@@ -33,6 +33,37 @@ import { makeCenterTexture, makeCornerTexture, makeTileTexture } from './texture
 import { Token, tokenKindForSeat, House, Hotel, CardDeck, CoinStack, WoodenTray } from './models'
 import { useFontsReady } from '../hooks/useFontsReady'
 
+/**
+ * Development-only hook: expose the tile each pawn is actually drawn on so the
+ * regression suite can assert `rendered pawn position === authoritative tile`
+ * without reading WebGL. Stripped from production builds (`import.meta.env.DEV`).
+ */
+const DEV = import.meta.env.DEV
+function publishPawnTile(seat: number, tile: number): void {
+  if (!DEV || typeof window === 'undefined') return
+  const w = window as unknown as { __bqPawns?: Record<number, number> }
+  if (!w.__bqPawns) w.__bqPawns = {}
+  w.__bqPawns[seat] = tile
+}
+
+/** True on phone-sized viewports — mirrors the mobile CSS breakpoints. */
+function useSmallScreen(): boolean {
+  const [small, setSmall] = useState(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(max-width: 820px)').matches
+      : false,
+  )
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    const mq = window.matchMedia('(max-width: 820px)')
+    const onChange = (): void => setSmall(mq.matches)
+    onChange()
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
+  return small
+}
+
 /* ---------------------------------- store ---------------------------------- */
 
 export interface BoardPlayer {
@@ -61,7 +92,7 @@ interface BoardState {
   buyTile: number | null
   owned: Record<number, PlayerColor>
   buildings: Record<number, number>
-  moveAnim: { seat: number; from: number; to: number; start: number } | null
+  moveAnim: { seat: number; from: number; to: number; start: number; dur?: number } | null
   last: { diceTotal: number; seat: number } | null
   lastThink: number
   thinkAt: number
@@ -120,7 +151,7 @@ export interface SceneState {
   dice: [number, number]
   rollTrigger: number
   rolledAt: number
-  moveAnim: { seat: number; from: number; to: number; start: number } | null
+  moveAnim: { seat: number; from: number; to: number; start: number; dur?: number } | null
   last: { diceTotal: number; seat: number } | null
   eventTile: number | null
   buyTile: number | null
@@ -358,10 +389,12 @@ function Pawn({
 
     let x: number
     let z: number
+    let tileNow: number
     if (from === to) {
       const [sx, sz] = pawnSpot(from, seat)
       x = sx
       z = sz
+      tileNow = from
     } else {
       const steps = to >= from ? to - from : to + 40 - from
       const seg = Math.min(Math.floor(t * steps), steps - 1)
@@ -372,6 +405,7 @@ function Pawn({
       const p1 = pawnSpot(i1, seat)
       x = p0[0] + (p1[0] - p0[0]) * frac
       z = p0[1] + (p1[1] - p0[1]) * frac
+      tileNow = i0 + frac
     }
 
     const time = state.clock.elapsedTime
@@ -380,6 +414,8 @@ function Pawn({
     const lift = moving ? 0.07 + Math.abs(Math.sin(t * Math.PI * 4)) * 0.1 : 0
     g.position.set(x, TILE_TOP + bob + lift, z)
     g.rotation.y += delta * 0.4
+    // Dev-only: the tile this pawn is visually standing on right now.
+    publishPawnTile(seat, t >= 1 ? to : tileNow)
 
     const squash = isTurn ? 1 + Math.sin(time * 4.2) * 0.025 : 1
     g.scale.set(1 / squash, squash, 1 / squash)
@@ -582,6 +618,7 @@ function BoardWorld({
   resetToken,
   selectedTile,
   onTileSelect,
+  lowPower = false,
 }: {
   store: BoardStore
   autoRotate: boolean
@@ -590,6 +627,7 @@ function BoardWorld({
   resetToken: number
   selectedTile: number | null
   onTileSelect?: (index: number) => void
+  lowPower?: boolean
 }) {
   const [, force] = useReducer((n: number) => n + 1, 0)
   useEffect(() => store.subscribe(force), [store])
@@ -611,12 +649,34 @@ function BoardWorld({
   }, [fontsReady])
   const centerTex = useMemo(() => (fontsReady ? makeCenterTexture() : null), [fontsReady])
 
-  const progressRefs = useMemo(() => s.players.map(() => ({ current: 0 })), [s.players])
+  // Stable per-seat progress refs: the pawns read these every frame. They must
+  // survive snapshot re-renders (players[] identity changes on every broadcast)
+  // or a mid-hop snapshot would reset the animation back to the start tile.
+  const progressRefs = useMemo(() => Array.from({ length: 8 }, () => ({ current: 1 })), [])
 
   // master animation driver: dice settle -> move pawns -> land events
   // In net mode this logic lives on the server; here we only animate visuals.
   useFrame(() => {
-    if (netMode) return
+    if (netMode) {
+      // Net mode: the SERVER owns the movement schedule, so the scene never
+      // mutates game state here — it only converts the snapshot's hop (start +
+      // duration) into per-pawn interpolation progress. When no hop is in
+      // flight the pawns read their authoritative tile directly.
+      const st = store.get()
+      const now = Date.now()
+      for (const p of st.players) {
+        const ref = progressRefs[p.seat]
+        if (!ref) continue
+        if (st.moveAnim && st.moveAnim.seat === p.seat) {
+          const { start, dur, from, to } = st.moveAnim
+          const d = dur || 260 + (to >= from ? to - from : to + 40 - from) * 150
+          ref.current = Math.min(Math.max((now - start) / d, 0), 1)
+        } else {
+          ref.current = 1
+        }
+      }
+      return
+    }
     const st = store.get()
     const now = Date.now()
 
@@ -768,7 +828,7 @@ function BoardWorld({
   return (
     <group>
       {/* table shadow catcher */}
-      <ContactShadows position={[0, -1.42, 0]} opacity={0.55} scale={30} blur={2.6} far={5} />
+      {!lowPower && <ContactShadows position={[0, -1.42, 0]} opacity={0.55} scale={30} blur={2.6} far={5} />}
 
       {/* pedestal */}
       <RoundedBox
@@ -949,6 +1009,10 @@ export function BoardScene({
   )
   const store = (externalStore ?? localStore) as BoardStore
   const netMode = Boolean(externalStore)
+  // Phones keep the same scene but drop the expensive passes: no shadow map,
+  // no soft contact shadows, no MSAA, and a capped pixel ratio. Visuals stay
+  // intact on desktop where the extra work is affordable.
+  const lowPower = useSmallScreen()
 
   useEffect(() => {
     if (!externalStore) onStore?.(store)
@@ -956,9 +1020,9 @@ export function BoardScene({
 
   return (
     <Canvas
-      shadows
-      dpr={[1, 2]}
-      gl={{ antialias: true }}
+      shadows={!lowPower}
+      dpr={lowPower ? [1, 1.5] : [1, 2]}
+      gl={{ antialias: !lowPower, powerPreference: 'high-performance' }}
       camera={{ fov: 38, position: [12.6, 14.2, 12.6], near: 0.1, far: 120 }}
       style={{ touchAction: 'none' }}
     >
@@ -970,6 +1034,7 @@ export function BoardScene({
         resetToken={resetToken}
         selectedTile={selectedTile}
         onTileSelect={onTileSelect}
+        lowPower={lowPower}
       />
     </Canvas>
   )

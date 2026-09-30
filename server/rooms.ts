@@ -176,6 +176,21 @@ interface Game {
 
 let logId = 0
 
+/**
+ * Dice source. Production rolls randomly; the regression suite can pin exact
+ * rolls with BQ_FORCE_DICE="5,1,3,…" so movement can be asserted deterministically.
+ * Values are consumed left to right and the queue falls back to real randomness
+ * once exhausted, so a long game never blocks.
+ */
+const forcedDice: number[] = (process.env.BQ_FORCE_DICE || '')
+  .split(',')
+  .map((n) => Number(n.trim()))
+  .filter((n) => Number.isInteger(n) && n >= 1 && n <= 6)
+function nextDie(): number {
+  const forced = forcedDice.shift()
+  return forced ?? rollDie()
+}
+
 function pushLog(g: Game, color: string, text: string): void {
   g.log.push({ id: ++logId, text, color })
   if (g.log.length > 80) g.log.shift()
@@ -221,7 +236,38 @@ function gameSnapshot(room: Room): GameSnapshot {
   }
 }
 
+/**
+ * Server-side assertions for state combinations that the turn flow makes
+ * impossible. A violation means the movement/turn lifecycle has desynchronised
+ * (the exact class of bug that froze real two-device games), so it is reported
+ * loudly. It never throws: one bad room must not take down the process.
+ */
+function assertGameInvariants(room: Room): void {
+  const g = room.game
+  if (!g || g.winner) return
+  const problems: string[] = []
+  const phase = g.phase
+  // 'moving' is a purely visual, client-side phase: the server resolves the
+  // whole landing synchronously and broadcasts the resulting phase.
+  if (phase === 'moving') problems.push("phase='moving' is client-only and must never be broadcast")
+  if (phase === 'buy' && g.buyTile == null) problems.push('phase=buy without buyTile')
+  if (g.buyTile != null && phase !== 'buy') problems.push(`buyTile set during phase=${phase}`)
+  if (phase === 'event' && g.eventTile == null) problems.push('phase=event without eventTile')
+  if (phase === 'debt' && !g.debt) problems.push('phase=debt without debt state')
+  if (g.debt && phase !== 'debt') problems.push(`debt state during phase=${phase}`)
+  if (phase === 'auction' && !g.auction) problems.push('phase=auction without auction state')
+  if (g.auction && phase !== 'auction') problems.push(`auction state during phase=${phase}`)
+  if (phase === 'idle' && (g.buyTile != null || g.debt || g.auction || g.eventTile != null)) {
+    problems.push('phase=idle while an action is still pending')
+  }
+  const cur = g.players[g.current]
+  if (!cur) problems.push(`current index ${g.current} has no player`)
+  else if (cur.bankrupt) problems.push(`current player ${cur.name} is bankrupt`)
+  if (problems.length) log(`INVARIANT room ${room.code}: ${problems.join('; ')}`)
+}
+
 function broadcastGame(room: Room): void {
+  assertGameInvariants(room)
   const msg: ServerMsg = { t: 'state', game: gameSnapshot(room) }
   for (const p of room.players) p.send?.(msg)
 }
@@ -525,7 +571,7 @@ function doRoll(room: Room, playerId: string): void {
 /** Server generates the dice, broadcasts the roll, schedules the landing. */
 function rollAndMove(room: Room, p: GamePlayer): void {
   const g = room.game as Game
-  const dice: Dice = [rollDie(), rollDie()]
+  const dice: Dice = [nextDie(), nextDie()]
   g.dice = dice
   g.rollId++
   g.rolledAt = Date.now()
@@ -830,6 +876,8 @@ function doEventOk(room: Room, playerId: string): void {
 function afterTurnAction(room: Room): void {
   const g = room.game as Game
   const p = g.players[g.current]
+  if (process.env.BQ_DEBUG_TURN)
+    log(`TURN-DBG ${room.code}: afterTurnAction cur=${p?.id} doubles=${g.doubles} debt=${Boolean(g.debt)}`)
   // Doubles grant another roll (unless jailed mid-turn).
   if (p && g.doubles > 0 && !p.inJail && !g.debt) {
     g.phase = 'idle'
@@ -889,7 +937,7 @@ function doJailAction(room: Room, playerId: string, action: 'pay' | 'card' | 'ro
   }
 
   // Roll for doubles (third attempt always pays and moves).
-  const dice: Dice = [rollDie(), rollDie()]
+  const dice: Dice = [nextDie(), nextDie()]
   g.dice = dice
   g.rollId++
   g.rolledAt = Date.now()
@@ -960,7 +1008,10 @@ function doBuy(room: Room, playerId: string, accept: boolean): void {
     p.cash -= price
     g.owned[String(tile)] = p.id
     pushLog(g, p.color, `${p.name} bought ${t?.name ?? 'a property'} for M ${price}`)
-    g.phase = 'moving'
+    // Landing resolved: clear the pending action BEFORE the turn advances so no
+    // snapshot can ever show a phantom move or a stale buy prompt.
+    g.phase = 'idle'
+    g.buyTile = null
     broadcastGame(room)
     afterTurnAction(room)
   } else {
@@ -1255,7 +1306,12 @@ function scheduleAuction(room: Room): void {
   const wait = Math.max(a.deadline - Date.now(), 400)
   const timer = setTimeout(() => {
     auctionTimers.delete(room.code)
-    if (!room.game?.auction || room.game.auction !== a) return
+    if (!room.game?.auction || room.game.auction !== a) {
+      if (process.env.BQ_DEBUG_AUCTION) log(`AUCTION-DBG ${room.code}: timer fired but auction gone/changed`)
+      return
+    }
+    if (process.env.BQ_DEBUG_AUCTION)
+      log(`AUCTION-DBG ${room.code}: deadline pass by bidder=${a.bidder} highest=${a.highest} passed=[${a.passed.join(',')}]`)
     // Window expired: treat the current player as passing.
     doAuctionPass(room, a.bidder ?? '')
   }, wait)
@@ -1310,15 +1366,25 @@ function doAuctionPass(room: Room, playerId: string): void {
   const a = g.auction
   // Only the player holding the bid window may pass — otherwise anyone could
   // force-pass on behalf of an opponent (server-authoritative turn order).
-  if (a.bidder !== playerId) return
+  if (a.bidder !== playerId) {
+    if (process.env.BQ_DEBUG_AUCTION)
+      log(`AUCTION-DBG ${room.code}: pass ignored — bidder=${a.bidder} but closer=${playerId} passed=[${a.passed.join(',')}]`)
+    return
+  }
   const p = g.players.find((pp) => pp.id === playerId)
-  if (!p || a.passed.includes(playerId)) return
+  if (!p || a.passed.includes(playerId)) {
+    if (process.env.BQ_DEBUG_AUCTION)
+      log(`AUCTION-DBG ${room.code}: pass ignored — closer=${playerId} exists=${Boolean(p)} alreadyPassed=${a.passed.includes(playerId)}`)
+    return
+  }
 
   a.passed.push(playerId)
   a.log.push(`${p.name} passes`)
   if (a.log.length > 12) a.log.shift()
 
   const remaining = auctionParticipants(g)
+  if (process.env.BQ_DEBUG_TURN)
+    log(`TURN-DBG ${room.code}: pass by=${playerId} remaining=[${remaining.map((o) => o.id).join(',')}] highest=${a.highest} highestBidder=${a.highestBidder ?? 'none'}`)
   if (remaining.length === 0 || (remaining.length === 1 && a.highestBidder != null)) {
     finishAuction(room)
     return
@@ -1357,7 +1423,10 @@ function finishAuction(room: Room): void {
   } else {
     pushLog(g, '#9aa7c7', `${tile?.name ?? 'Property'} went unsold — nobody bid`)
   }
-  g.phase = 'moving'
+  // The auction decided the landing: the turn may now complete normally.
+  if (process.env.BQ_DEBUG_TURN)
+    log(`TURN-DBG ${room.code}: finishAuction winner=${a.highestBidder ?? 'none'} amount=${a.highest} -> afterTurnAction`)
+  g.phase = 'idle'
   broadcastGame(room)
   afterTurnAction(room)
 }

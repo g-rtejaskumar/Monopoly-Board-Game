@@ -218,7 +218,7 @@ async function main(): Promise<void> {
   const port = 20000 + Math.floor(Math.random() * 20000)
   const serverOut = { text: '' }
   const server = spawn('npx', ['tsx', 'server/index.ts'], {
-    env: { ...process.env, PORT: String(port) },
+    env: { ...process.env, PORT: String(port), BQ_DEBUG_AUCTION: '1', BQ_DEBUG_TURN: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: process.platform === 'win32',
   })
@@ -235,6 +235,24 @@ async function main(): Promise<void> {
     }
   }, 1000)
 
+  // Event-loop heartbeat: a healthy test process turns this every ~250ms.
+  // Long gaps mean THIS process's event loop was starved (machine load), which
+  // freezes every timer-driven flow the test observes and can masquerade as a
+  // server-side hang.
+  const heartbeat = { last: Date.now(), maxGap: 0, gaps: 0 }
+  const hbTimer = setInterval(() => {
+    const gap = Date.now() - heartbeat.last
+    if (gap > 3000) heartbeat.gaps++
+    heartbeat.maxGap = Math.max(heartbeat.maxGap, gap)
+    heartbeat.last = Date.now()
+  }, 250)
+  const offHeartbeat = (): void => {
+    clearInterval(hbTimer)
+    console.log(
+      `[diag] test-process heartbeat: maxGap=${heartbeat.maxGap}ms gapsOver3s=${heartbeat.gaps}`,
+    )
+  }
+
   const globalTimer = setTimeout(() => {
     check(`smoke flow completed within ${GLOBAL_TIMEOUT_MS / 1000}s`, false, 'global timeout — game likely froze')
     console.log('[diag] server output tail:', serverOut.text.split('\n').slice(-12).join('\n'))
@@ -248,6 +266,7 @@ async function main(): Promise<void> {
     clearInterval(crashChecker)
     clearTimeout(globalTimer)
     offWatchdog()
+    offHeartbeat()
     alice?.close()
     if (process.platform === 'win32' && server.pid) {
       try {
@@ -324,7 +343,9 @@ async function main(): Promise<void> {
     let lastIdleAt = 0
     const debtAttempts = new Map<string, number>()
     let lastDebtKey = ''
-    const deadline = Date.now() + 300_000
+    // 400s: game pace varies with dice/cards/auctions (~15-20s per full round);
+    // 300s intermittently budgeted out just short of MIN_HUMAN_TURNS.
+    const deadline = Date.now() + 400_000
 
     const onSnapshot = (g: GameSnapshot): void => {
       // Invariants on every change, but reported at most once per turn.
@@ -345,7 +366,7 @@ async function main(): Promise<void> {
       if (line !== lastLine) {
         lastLine = line
         lineHistory.push(`${new Date().toISOString().slice(11, 19)} ${line}`)
-        if (lineHistory.length > 10) lineHistory.shift()
+        if (lineHistory.length > 120) lineHistory.shift()
       }
 
       if (Date.now() >= deadline || winnerSeen != null) return
@@ -416,6 +437,9 @@ async function main(): Promise<void> {
       humanTurns >= MIN_HUMAN_TURNS || winnerSeen != null,
       `got ${humanTurns}${winnerSeen ? ' (game finished early — valid)' : ''}`,
     )
+    if (humanTurns < MIN_HUMAN_TURNS && winnerSeen == null) {
+      console.log('[diag] server output tail:', serverOut.text.split('\n').slice(-25).join('\n'))
+    }
     check('bot takes its turns automatically', sawBotTurn && botTurnCompleted, `saw=${sawBotTurn} done=${botTurnCompleted}`)
     check('game invariants held across all snapshots', invFailures === 0, lastInvSummary || `${invChecked} snapshots verified`)
     const final = alice.latestGame()

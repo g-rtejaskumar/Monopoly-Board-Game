@@ -15,6 +15,7 @@ import {
   IconDice,
   IconGear,
   IconPlus,
+  IconUsers,
 } from '../components/Icons'
 import { PLAYER_COLORS } from '../game/types'
 import type { PlayerColor } from '../game/types'
@@ -167,6 +168,9 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
 
   // --- tile selection (property card in the sidebar) ---
   const [selectedTile, setSelectedTile] = useState<number | null>(null)
+
+  // --- mobile bottom sheet (player/property/log details) ---
+  const [detailsOpen, setDetailsOpen] = useState(false)
 
   // --- chat (server relayed) ---
   const [chatOpen, setChatOpen] = useState(false)
@@ -326,6 +330,14 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
         <div className="topbar-actions">
           <ModeBadge mode="online" />
           <button
+            className={`btn btn-icon mobile-only ${detailsOpen ? 'active' : ''}`}
+            aria-label="Game details"
+            title="Players, property card and game log"
+            onClick={() => setDetailsOpen((v) => !v)}
+          >
+            <IconUsers />
+          </button>
+          <button
             className={`btn btn-icon ${chatOpen ? 'active' : ''}`}
             aria-label="Chat"
             onClick={() => setChatOpen((v) => !v)}
@@ -369,6 +381,9 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
                   {p.inJail ? ' ⛓️' : ''}
                 </span>
                 <span className="rail-cash">M {p.cash.toLocaleString()}</span>
+                <span className="rail-tile" title={getTile(p.tile)?.name ?? undefined}>
+                  {p.bankrupt ? 'out' : `Tile ${p.tile}`}
+                </span>
               </div>
               {p.connected === false && !p.bankrupt && (
                 <span className="rail-offline">reconnecting…</span>
@@ -406,6 +421,18 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
           />
 
           <div className="board-overlay-bottom">
+            {/* Mobile: whose turn, your money and your position stay visible in
+                the sticky action area instead of needing a scroll into the rail. */}
+            <div className="mobile-turn-summary">
+              <span className="mts-turn">
+                {isMyTurn ? 'YOUR TURN' : current ? `${current.name}'s turn` : 'Setting up…'}
+              </span>
+              {me && <span className="mts-cash">M {me.cash.toLocaleString()}</span>}
+              {me && !me.bankrupt && (
+                <span className="mts-tile">{getTile(me.tile)?.name ?? `Tile ${me.tile}`}</span>
+              )}
+              {s.last && <span className="mts-last">Last roll {s.last.diceTotal}</span>}
+            </div>
             {canRoll ? (
               <button className="btn btn-primary btn-xl roll-btn" onClick={doRoll}>
                 <IconDice /> Roll Dice
@@ -524,7 +551,17 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
         </div>
 
         {/* ---------------- right: info sidebar ---------------- */}
-        <aside className="side-rail">
+        {/* On phones this becomes the collapsible bottom sheet opened by the
+            "Game details" button — same panels, nothing dropped. */}
+        <aside className={`side-rail ${detailsOpen ? 'mobile-open' : ''}`}>
+          <button
+            type="button"
+            className="sheet-close mobile-only"
+            aria-label="Close details"
+            onClick={() => setDetailsOpen(false)}
+          >
+            ✕
+          </button>
           {/* players panel */}
           <div className="side-block players-block">
             <h3>
@@ -633,6 +670,71 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
           </div>
         </aside>
       </main>
+
+      {/* Dev-only state indicator: current player, phase, moving seat, pending
+          action and every authoritative position — the data needed to debug a
+          multiplayer desync. Never rendered in a production build. */}
+      {import.meta.env.DEV && (
+        <div
+          className="diag-overlay"
+          data-testid="diag"
+          data-you={net.youId ?? ''}
+          data-phase={phase}
+          data-current={current?.id ?? ''}
+          data-moving={s.moveAnim ? String(s.moveAnim.seat) : ''}
+          data-pending={
+            s.buyTile != null
+              ? 'buy'
+              : s.eventTile != null
+                ? 'event'
+                : game.phase === 'jail'
+                  ? 'jail'
+                  : game.phase === 'auction'
+                    ? 'auction'
+                    : game.debt
+                      ? 'debt'
+                      : 'none'
+          }
+        >
+          <div className="diag-title">DEV · authoritative state</div>
+          {s.players.map((p) => {
+            const animating = s.moveAnim != null && s.moveAnim.seat === p.seat
+            return (
+              <div
+                key={p.id}
+                className="diag-player"
+                data-seat={p.seat}
+                data-tile={p.tile}
+                data-rendered={animating ? (s.moveAnim?.to ?? p.tile) : p.tile}
+                data-cash={p.cash}
+              >
+                <span>
+                  seat {p.seat}
+                  {p.id === net.youId ? ' (you)' : ''}
+                </span>
+                <span>pos {p.tile}</span>
+                <span>pawn {animating ? `→ ${s.moveAnim?.to}` : p.tile}</span>
+                <span>M {p.cash}</span>
+              </div>
+            )
+          })}
+          <div className="diag-row">
+            turn {current?.name ?? '—'} · phase {phase} · moving{' '}
+            {s.moveAnim ? `seat ${s.moveAnim.seat}` : 'none'} · pending{' '}
+            {s.buyTile != null
+              ? `buy@${s.buyTile}`
+              : s.eventTile != null
+                ? `event@${s.eventTile}`
+                : game.phase === 'jail'
+                  ? 'jail'
+                  : game.phase === 'auction'
+                    ? 'auction'
+                    : game.debt
+                      ? 'debt'
+                      : 'none'}
+          </div>
+        </div>
+      )}
 
       {chatOpen && (
         <aside className="chat-drawer">
