@@ -1,0 +1,504 @@
+/* ==========================================================================
+   BoardQuest — fixed 2D board
+   --------------------------------------------------------------------------
+   A crisp, warm-table 2D board generated entirely from tile data + geometry.
+   Design tokens live here so the board's palette is centralised and never
+   scattered through components. Property-group colours are injected per tile
+   as `--bq-band` / `--bq-band-light` from `GROUP_COLORS` (the single source of
+   truth in boardData.ts).
+
+   Sizing is resolution independent: the playfield is a CSS container and every
+   font size is expressed in `cqw`, so tiles stay proportional on any screen.
+   ========================================================================== */
+
+.bq-board {
+  --bq-frame-1: #8a5c31;
+  --bq-frame-2: #5f3d1f;
+  --bq-playfield: #f8f0de;
+  --bq-playfield-2: #f1e4c9;
+  --bq-tile: #fffdf7;
+  --bq-tile-edge: rgba(96, 70, 40, 0.26);
+  --bq-ink: #3a2c1b;
+  --bq-ink-soft: #7a6a53;
+  --bq-band: #b9a88c;
+  --bq-band-light: #d8c9b1;
+  --bq-owner: transparent;
+  --bq-gold: #d9a441;
+  --bq-radius: 14px;
+  --bq-tile-radius: 3px;
+
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  aspect-ratio: 1 / 1;
+  padding: clamp(6px, 1.1cqw, 16px);
+  border-radius: var(--bq-radius);
+  background: linear-gradient(150deg, var(--bq-frame-1) 0%, var(--bq-frame-2) 100%);
+  box-shadow:
+    0 26px 60px -22px rgba(20, 12, 4, 0.72),
+    0 2px 0 rgba(255, 236, 200, 0.22) inset,
+    0 -3px 0 rgba(40, 22, 6, 0.5) inset;
+  container-type: inline-size;
+  container-name: bqboard;
+}
+
+.bq-board-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: calc(var(--bq-radius) - 6px);
+  background: radial-gradient(120% 120% at 50% 30%, var(--bq-playfield) 0%, var(--bq-playfield-2) 100%);
+  box-shadow: 0 0 0 1px rgba(70, 48, 24, 0.4) inset;
+  overflow: hidden;
+}
+
+/* --------------------------------- centre --------------------------------- */
+
+.bq-center {
+  position: absolute;
+  left: 13%;
+  top: 13%;
+  width: 74%;
+  height: 74%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5cqw 3cqw 4cqw;
+  border-radius: 6px;
+  background:
+    radial-gradient(75% 55% at 50% 42%, rgba(255, 255, 255, 0.65), transparent 70%),
+    repeating-linear-gradient(45deg, rgba(180, 150, 100, 0.05) 0 8px, transparent 8px 16px);
+  box-shadow: 0 0 0 2px rgba(217, 164, 65, 0.35) inset;
+  pointer-events: none;
+  text-align: center;
+}
+
+.bq-wordmark {
+  display: flex;
+  align-items: center;
+  gap: 0.9cqw;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 2.9cqw;
+  letter-spacing: 0.34em;
+  color: #4a3418;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+.bq-wordmark-dot {
+  width: 1.5cqw;
+  height: 1.5cqw;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #ffd27a, #d9822b);
+  box-shadow: 0 0 0 0.3cqw rgba(217, 130, 43, 0.18);
+}
+
+.bq-center-mid {
+  flex: 1;
+}
+
+.bq-center-foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6cqw;
+}
+
+.bq-center-turn {
+  font-size: 1.7cqw;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #6b5330;
+}
+
+.bq-center-dice {
+  font-family: var(--font-display);
+  font-size: 2cqw;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  color: #8a5a1c;
+  background: rgba(217, 164, 65, 0.16);
+  border: 1px solid rgba(217, 164, 65, 0.4);
+  border-radius: 999px;
+  padding: 0.5cqw 1.6cqw;
+}
+
+/* --------------------------------- tiles ---------------------------------- */
+
+.bq-tile {
+  position: absolute;
+  display: block;
+  padding: 0;
+  margin: 0;
+  border: 1px solid var(--bq-tile-edge);
+  border-radius: var(--bq-tile-radius);
+  background: var(--bq-tile);
+  color: var(--bq-ink);
+  font-family: var(--font-body);
+  line-height: 1.05;
+  overflow: hidden;
+  cursor: pointer;
+  text-align: center;
+  transition: transform 0.14s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+}
+
+.bq-tile:hover {
+  z-index: 3;
+  border-color: rgba(90, 60, 26, 0.55);
+  box-shadow: 0 6px 14px -6px rgba(40, 24, 6, 0.6);
+  transform: translateY(-1px);
+}
+
+.bq-tile:focus-visible {
+  z-index: 4;
+  outline: 3px solid var(--amber, #f5a83c);
+  outline-offset: 1px;
+}
+
+.bq-tile.is-selected {
+  z-index: 5;
+  border-color: #e0881f;
+  box-shadow: 0 0 0 2px rgba(224, 136, 31, 0.8), 0 10px 20px -8px rgba(120, 60, 0, 0.7);
+}
+
+.bq-tile.has-current {
+  box-shadow: 0 0 0 2px rgba(245, 168, 60, 0.75) inset;
+}
+
+/* --- special tile identities --------------------------------------------- */
+
+.bq-tile--railroad {
+  background: linear-gradient(160deg, #f6ead4, #e9d6b4);
+}
+.bq-tile--utility {
+  background: linear-gradient(160deg, #e8f4fb, #cfe8f7);
+}
+.bq-tile--chance {
+  background: linear-gradient(160deg, #fdefd6, #f7dca8);
+}
+.bq-tile--community {
+  background: linear-gradient(160deg, #e6f6f2, #c8ebe2);
+}
+.bq-tile--tax {
+  background: linear-gradient(160deg, #fde6e4, #f8c9c4);
+}
+.bq-tile--start {
+  background: linear-gradient(150deg, #8fd9a4, #4fae6d);
+  color: #12361f;
+}
+.bq-tile--jail {
+  background: linear-gradient(150deg, #d8dee9, #aab6c8);
+  color: #1f2b3d;
+}
+.bq-tile--free-parking {
+  background: linear-gradient(150deg, #ffe9a8, #f7c95a);
+  color: #4a3608;
+}
+.bq-tile--go-to-jail {
+  background: linear-gradient(150deg, #f39a8e, #d95b4a);
+  color: #3d100a;
+}
+
+/* --- colour band (faces the centre of the board) -------------------------- */
+
+.bq-band {
+  position: absolute;
+  background: linear-gradient(180deg, var(--bq-band-light), var(--bq-band));
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.5) inset, 0 -1px 0 rgba(0, 0, 0, 0.12) inset;
+}
+
+/* Corners never carry a band. */
+.bq-side-corner .bq-band {
+  display: none;
+}
+
+/* Streets: band on the edge that faces the board centre. */
+.bq-side-bottom .bq-band--top {
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 17%;
+}
+.bq-side-top .bq-band--bottom {
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 17%;
+}
+.bq-side-left .bq-band--right {
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 17%;
+}
+.bq-side-right .bq-band--left {
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 17%;
+}
+
+/* Keep text clear of the band. */
+.bq-side-bottom .bq-tile-body {
+  padding-top: 19%;
+}
+.bq-side-top .bq-tile-body {
+  padding-bottom: 19%;
+}
+.bq-side-left .bq-tile-body {
+  padding-right: 19%;
+}
+.bq-side-right .bq-tile-body {
+  padding-left: 19%;
+}
+
+/* --- tile body ------------------------------------------------------------ */
+
+.bq-tile-body {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35cqw;
+  width: 100%;
+  height: 100%;
+  padding: 0.7cqw;
+  box-sizing: border-box;
+}
+
+.bq-icon {
+  font-size: 2.6cqw;
+  line-height: 1;
+}
+
+.bq-name {
+  font-size: 1.78cqw;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+  color: var(--bq-ink);
+  overflow-wrap: anywhere;
+  hyphens: auto;
+  max-width: 100%;
+}
+
+.bq-tile--property .bq-name {
+  color: #33261a;
+}
+
+.bq-abbr {
+  display: none;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 2.6cqw;
+  letter-spacing: 0.02em;
+  color: var(--bq-ink);
+}
+
+.bq-price {
+  font-size: 1.5cqw;
+  font-weight: 700;
+  color: #7c5a22;
+  background: rgba(217, 164, 65, 0.16);
+  border-radius: 999px;
+  padding: 0.15cqw 0.8cqw;
+  white-space: nowrap;
+}
+
+.bq-tile--start .bq-price,
+.bq-tile--jail .bq-price,
+.bq-tile--free-parking .bq-price,
+.bq-tile--go-to-jail .bq-price {
+  color: inherit;
+}
+
+.bq-buildings {
+  font-size: 1.15cqw;
+  line-height: 1;
+  letter-spacing: -0.05em;
+}
+
+/* --- ownership ------------------------------------------------------------ */
+
+.bq-tile.is-owned {
+  border-color: color-mix(in srgb, var(--bq-owner) 60%, rgba(60, 40, 16, 0.5));
+  border-width: 2px;
+}
+
+/* Ownership is signalled by the PRESENCE of this corner badge (plus a darker
+   tile border), not by colour alone — the badge stays readable in grayscale.
+   Which player owns it is spelled out in the tile's aria-label, the property
+   card and the player list. */
+.bq-owner-mark {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1.5cqw;
+  height: 1.5cqw;
+  border-radius: 0 0 3px 0;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.85) inset, 0 0 0 2px rgba(28, 18, 4, 0.6);
+  z-index: 2;
+}
+
+.bq-tile.is-mortgaged::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(60, 44, 24, 0.34) 0 4px,
+    transparent 4px 9px
+  );
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* --- DOM token fallback (no WebGL) ---------------------------------------- */
+
+.bq-dom-tokens {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.bq-dom-token {
+  position: absolute;
+  width: 3.1cqw;
+  height: 3.1cqw;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.6cqw;
+  font-weight: 800;
+  color: #1a1206;
+  border: 1.5px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 2px 5px rgba(30, 18, 4, 0.55);
+}
+
+.bq-dom-token.is-you {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9), 0 2px 6px rgba(30, 18, 4, 0.6);
+}
+
+/* ------------------------------ 3D overlay -------------------------------- */
+
+/* The selective 3D layer covers the playfield but never intercepts input: tiles
+   stay clickable/tappable and the board remains usable without WebGL. */
+.bq-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.bq-overlay canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  touch-action: none;
+}
+
+/* ------------------------------- compact mode ----------------------------- */
+
+/*
+ * Phone boards (~360–520px) can't print 40 full property names at a readable
+ * size. Below that width we switch to a compact tile: group colour band, a
+ * big bold abbreviation, the price, and the ownership mark. Tapping any tile
+ * opens the full property card in a bottom sheet.
+ */
+@container bqboard (max-width: 620px) {
+  .bq-name {
+    display: none;
+  }
+
+  .bq-abbr {
+    display: block;
+    font-size: 2.85cqw;
+  }
+
+  .bq-icon {
+    font-size: 4.8cqw;
+  }
+
+  .bq-price {
+    font-size: 2.4cqw;
+    padding: 0.3cqw 1.2cqw;
+  }
+
+  .bq-buildings {
+    font-size: 2cqw;
+  }
+
+  .bq-owner-mark {
+    width: 2.6cqw;
+    height: 2.6cqw;
+  }
+
+  .bq-dom-token {
+    width: 5cqw;
+    height: 5cqw;
+    font-size: 2.6cqw;
+  }
+
+  .bq-center {
+    padding: 4cqw 2cqw;
+  }
+
+  .bq-wordmark {
+    font-size: 4.2cqw;
+    letter-spacing: 0.2em;
+  }
+
+  .bq-center-turn {
+    font-size: 2.6cqw;
+  }
+
+  .bq-center-dice {
+    font-size: 3cqw;
+    padding: 0.8cqw 2.4cqw;
+  }
+}
+
+@container bqboard (max-width: 400px) {
+  .bq-price {
+    display: none;
+  }
+
+  .bq-abbr {
+    font-size: 3.6cqw;
+  }
+
+  .bq-icon {
+    font-size: 6cqw;
+  }
+
+  .bq-center-foot {
+    display: none;
+  }
+}
+
+/* ------------------------------ reduced motion ---------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .bq-tile {
+    transition: none;
+  }
+  .bq-tile:hover {
+    transform: none;
+  }
+}
+
+/* High-contrast / colour-blind aid: the owner mark gets a visible ring so
+   ownership never relies on the fill colour alone. */
+@media (prefers-contrast: more) {
+  .bq-owner-mark {
+    box-shadow: 0 0 0 2px #1a1206;
+  }
+}

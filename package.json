@@ -15,7 +15,9 @@
     "test:deploy": "tsx scripts/test-deploy.ts",
     "test:smoke": "tsx scripts/test-smoke.ts",
     "test:movement": "tsx scripts/test-movement.ts",
-    "test": "npm run test:protocol && npm run test:deploy && npm run test:smoke && npm run test:movement",
+    "test:board2d": "tsx scripts/test-board2d.ts",
+    "test:ui": "tsx scripts/test-ui.ts",
+    "test": "npm run test:protocol && npm run test:deploy && npm run test:smoke && npm run test:movement && npm run test:board2d",
     "check:prod": "tsx scripts/check-production.ts"
   },
   "dependencies": {

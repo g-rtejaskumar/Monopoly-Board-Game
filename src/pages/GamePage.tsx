@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
-import { BoardScene, resolveBuy, resolveEvent, rollDice } from '../three/BoardScene'
-import type { BoardPlayer, BoardStore, SceneStore } from '../three/BoardScene'
+import { GameBoard } from '../board/GameBoard'
+import { ActionDock, SheetTabs } from '../board/Hud'
+import type { SheetTab } from '../board/Hud'
+import type { ScenePlayer, SceneStore } from '../board/types'
+import { createDemoStore, resolveBuy, resolveEvent, rollDice, stepDemo } from '../game/demoBoard'
+import { useSmallScreen } from '../hooks/useSmallScreen'
 import { useNet } from '../net/NetContext'
 import { ModeBadge } from '../components/ConnectionState'
 import { createNetBoardStore } from '../net/netBoardStore'
@@ -161,16 +165,21 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
     }
   }, [game, onServerMsg])
 
-  // --- camera controls ---
-  const [view, setView] = useState<'iso' | 'top'>('iso')
-  const [resetToken, setResetToken] = useState(0)
-  const [autoRotate, setAutoRotate] = useState(false)
-
-  // --- tile selection (property card in the sidebar) ---
+  // --- tile selection (property card) + mobile bottom sheet ---
   const [selectedTile, setSelectedTile] = useState<number | null>(null)
-
-  // --- mobile bottom sheet (player/property/log details) ---
   const [detailsOpen, setDetailsOpen] = useState(false)
+  const [sheetTab, setSheetTab] = useState<SheetTab>('players')
+  const smallScreen = useSmallScreen()
+
+  // Tapping a tile highlights it; on a phone it also opens the property sheet.
+  const selectTile = useCallback(
+    (index: number) => {
+      setSelectedTile(index)
+      setSheetTab('property')
+      if (smallScreen) setDetailsOpen(true)
+    },
+    [smallScreen],
+  )
 
   // --- chat (server relayed) ---
   const [chatOpen, setChatOpen] = useState(false)
@@ -206,6 +215,22 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
   const me = s.players.find((p) => p.id === net.youId)
   const isMyTurn = Boolean(current && current.id === net.youId)
   const canRoll = isMyTurn && phase === 'idle' && s.eventTile == null && s.buyTile == null
+
+  // One human-readable description of the current state, shown in the action dock.
+  const turnStatusText =
+    game.phase === 'jail' && isMyTurn
+      ? 'You are in jail'
+      : game.phase === 'auction'
+        ? 'Auction in progress…'
+        : game.phase === 'debt'
+          ? 'Debt must be settled…'
+          : phase === 'rolling'
+            ? 'Rolling…'
+            : phase === 'moving'
+              ? `${current?.name ?? 'Player'} is moving…`
+              : current
+                ? `${current.name}'s turn`
+                : 'Setting up…'
 
   const [toast, setToast] = useState<Toast | null>(null)
   const toastKeyRef = useRef('')
@@ -409,84 +434,15 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
           </div>
         </aside>
 
-        {/* ---------------- center: 3D board ---------------- */}
+        {/* ---------------- centre: fixed 2D board + 3D pieces ---------------- */}
         <div className="board-wrap">
-          <BoardScene
+          <GameBoard
+            state={s}
             store={store as unknown as SceneStore}
-            view={view}
-            resetToken={resetToken}
-            autoRotate={autoRotate}
+            youId={net.youId}
             selectedTile={selectedTile}
-            onTileSelect={(i) => setSelectedTile(i)}
+            onSelectTile={selectTile}
           />
-
-          <div className="board-overlay-bottom">
-            {/* Mobile: whose turn, your money and your position stay visible in
-                the sticky action area instead of needing a scroll into the rail. */}
-            <div className="mobile-turn-summary">
-              <span className="mts-turn">
-                {isMyTurn ? 'YOUR TURN' : current ? `${current.name}'s turn` : 'Setting up…'}
-              </span>
-              {me && <span className="mts-cash">M {me.cash.toLocaleString()}</span>}
-              {me && !me.bankrupt && (
-                <span className="mts-tile">{getTile(me.tile)?.name ?? `Tile ${me.tile}`}</span>
-              )}
-              {s.last && <span className="mts-last">Last roll {s.last.diceTotal}</span>}
-            </div>
-            {canRoll ? (
-              <button className="btn btn-primary btn-xl roll-btn" onClick={doRoll}>
-                <IconDice /> Roll Dice
-                <span className="roll-hint">space</span>
-              </button>
-            ) : (
-              <div className={`turn-chip ${phase !== 'idle' ? 'busy' : ''}`}>
-                {game.phase === 'jail' && isMyTurn
-                  ? 'You are in jail'
-                  : game.phase === 'auction'
-                    ? 'Auction in progress…'
-                    : game.phase === 'debt'
-                      ? 'Debt must be settled…'
-                      : phase === 'rolling'
-                        ? 'Rolling…'
-                        : phase === 'moving'
-                          ? `${current?.name ?? 'Player'} is moving…`
-                          : current
-                            ? `${current.name}'s turn`
-                            : 'Setting up…'}
-              </div>
-            )}
-          </div>
-
-          <div className="board-cam-controls">
-            <button
-              className={`cam-btn ${view === 'iso' ? 'on' : ''}`}
-              onClick={() => setView('iso')}
-              title="Isometric 3D view"
-            >
-              3D
-            </button>
-            <button
-              className={`cam-btn ${view === 'top' ? 'on' : ''}`}
-              onClick={() => setView('top')}
-              title="Overhead 2D view"
-            >
-              2D
-            </button>
-            <button
-              className={`cam-btn ${autoRotate ? 'on' : ''}`}
-              onClick={() => setAutoRotate((v) => !v)}
-              title="Auto camera"
-            >
-              ⟳
-            </button>
-            <button
-              className="cam-btn"
-              onClick={() => setResetToken((t) => t + 1)}
-              title="Reset camera"
-            >
-              ⌂
-            </button>
-          </div>
 
           {toast && (
             <div className="dice-toast" data-color={toast.color}>
@@ -554,16 +510,23 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
         {/* On phones this becomes the collapsible bottom sheet opened by the
             "Game details" button — same panels, nothing dropped. */}
         <aside className={`side-rail ${detailsOpen ? 'mobile-open' : ''}`}>
-          <button
-            type="button"
-            className="sheet-close mobile-only"
-            aria-label="Close details"
-            onClick={() => setDetailsOpen(false)}
-          >
-            ✕
-          </button>
+          <div className="sheet-head mobile-only">
+            <SheetTabs
+              active={sheetTab}
+              onChange={setSheetTab}
+              labels={{ players: 'Players', property: 'Property', log: 'Log' }}
+            />
+            <button
+              type="button"
+              className="sheet-close"
+              aria-label="Close details"
+              onClick={() => setDetailsOpen(false)}
+            >
+              ✕
+            </button>
+          </div>
           {/* players panel */}
-          <div className="side-block players-block">
+          <div className={`side-block players-block sheet-pane ${sheetTab === 'players' ? 'is-active' : ''}`}>
             <h3>
               Players ({s.players.length}/8)
               <button
@@ -619,7 +582,7 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
           </div>
 
           {/* property card panel */}
-          <div className="side-block deed-block">
+          <div className={`side-block deed-block sheet-pane ${sheetTab === 'property' ? 'is-active' : ''}`}>
             <h3>Property card</h3>
             {selectedTile != null && getTile(selectedTile) ? (
               <DeedCard
@@ -643,7 +606,7 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
           </div>
 
           {/* game log */}
-          <div className="side-block log-block">
+          <div className={`side-block log-block sheet-pane ${sheetTab === 'log' ? 'is-active' : ''}`}>
             <h3>Game log</h3>
             <div className="log-list">
               {s.log
@@ -669,6 +632,59 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
             {s.last && <p className="deed-note">rolled {s.last.diceTotal}</p>}
           </div>
         </aside>
+
+        <ActionDock
+          info={{
+            isMyTurn,
+            currentName: current?.name ?? null,
+            currentColor: current?.color,
+            meCash: me?.cash,
+            myTileName: me && !me.bankrupt ? getTile(me.tile)?.name ?? `Tile ${me.tile}` : undefined,
+            lastRoll: s.last
+              ? {
+                  dice: s.dice,
+                  total: s.last.diceTotal,
+                  byName: s.players[s.last.seat]?.name ?? 'Player',
+                }
+              : null,
+            status: turnStatusText,
+            busy: phase !== 'idle',
+          }}
+        >
+          {canRoll ? (
+            <button className="btn btn-primary btn-xl roll-btn" onClick={doRoll}>
+              <IconDice /> Roll Dice
+              <span className="roll-hint">space</span>
+            </button>
+          ) : (
+            <div className={`turn-chip ${phase !== 'idle' ? 'busy' : ''}`}>{turnStatusText}</div>
+          )}
+          <div className="action-quick mobile-only">
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => {
+                setSheetTab('players')
+                setDetailsOpen(true)
+              }}
+            >
+              <IconUsers /> Players
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => {
+                setSheetTab('log')
+                setDetailsOpen(true)
+              }}
+            >
+              Game log
+            </button>
+            <button type="button" className="btn btn-sm" onClick={() => setTradeOpen(true)}>
+              <IconPlus /> Trade
+            </button>
+          </div>
+        </ActionDock>
       </main>
 
       {/* Dev-only state indicator: current player, phase, moving seat, pending
@@ -828,7 +844,7 @@ function DemoGame() {
   const location = useLocation()
   const state = (location.state ?? {}) as RoutePlayers
 
-  const players: BoardPlayer[] = useMemo(() => {
+  const players: ScenePlayer[] = useMemo(() => {
     const fromLobby = state.players ?? []
     if (fromLobby.length >= 2) {
       return fromLobby.map((p, i) => ({
@@ -852,26 +868,44 @@ function DemoGame() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const [store, setStore] = useState<BoardStore | null>(null)
+  const store = useMemo(() => createDemoStore(players), [players])
   const [, force] = useReducer((n: number) => n + 1, 0)
-  const onStore = useCallback((st: BoardStore) => setStore(st), [])
+  useEffect(() => store.subscribe(() => force()), [store])
 
+  // Practice mode has no server: step the local engine on a short interval.
   useEffect(() => {
-    if (!store) return
-    return store.subscribe(() => force())
+    const id = window.setInterval(() => stepDemo(store, Date.now()), 32)
+    return () => window.clearInterval(id)
   }, [store])
 
-  const [view, setView] = useState<'iso' | 'top'>('iso')
-  const [resetToken, setResetToken] = useState(0)
-  const [autoRotate, setAutoRotate] = useState(false)
   const [selectedTile, setSelectedTile] = useState<number | null>(null)
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const [sheetTab, setSheetTab] = useState<SheetTab>('players')
+  const smallScreen = useSmallScreen()
+  const selectTile = useCallback(
+    (index: number) => {
+      setSelectedTile(index)
+      setSheetTab('property')
+      if (smallScreen) setDetailsOpen(true)
+    },
+    [smallScreen],
+  )
   const [chatOpen, setChatOpen] = useState(false)
 
-  const s = store?.get()
-  const phase = s?.phase ?? 'idle'
-  const current = s ? s.players[s.current] : undefined
+  const s = store.get()
+  const phase = s.phase
+  const current = s.players[s.current]
   const isMyTurn = current?.seat === 0
-  const canRoll = Boolean(s) && isMyTurn && phase === 'idle' && s?.eventTile == null && s?.buyTile == null
+  const canRoll = isMyTurn && phase === 'idle' && s.eventTile == null && s.buyTile == null
+
+  const turnStatusText =
+    phase === 'rolling'
+      ? 'Rolling…'
+      : phase === 'moving'
+        ? `${current?.name ?? 'Player'} is moving…`
+        : current
+          ? `${current.name}'s turn`
+          : 'Setting up…'
 
   const [toast, setToast] = useState<Toast | null>(null)
   const toastKeyRef = useRef('')
@@ -960,65 +994,13 @@ function DemoGame() {
         </aside>
 
         <div className="board-wrap">
-          <BoardScene
-            players={players}
-            onStore={onStore}
-            view={view}
-            resetToken={resetToken}
-            autoRotate={autoRotate}
+          <GameBoard
+            state={s}
+            store={store}
+            youId={s.players.find((p) => p.seat === 0)?.id ?? null}
             selectedTile={selectedTile}
-            onTileSelect={(i) => setSelectedTile(i)}
+            onSelectTile={selectTile}
           />
-
-          <div className="board-overlay-bottom">
-            {canRoll && store ? (
-              <button className="btn btn-primary btn-xl roll-btn" onClick={() => rollDice(store)}>
-                <IconDice /> Roll Dice
-                <span className="roll-hint">space</span>
-              </button>
-            ) : (
-              <div className={`turn-chip ${phase !== 'idle' ? 'busy' : ''}`}>
-                {phase === 'rolling'
-                  ? 'Rolling…'
-                  : phase === 'moving'
-                    ? `${current?.name ?? 'Player'} is moving…`
-                    : current
-                      ? `${current.name}'s turn`
-                      : 'Setting up…'}
-              </div>
-            )}
-          </div>
-
-          <div className="board-cam-controls">
-            <button
-              className={`cam-btn ${view === 'iso' ? 'on' : ''}`}
-              onClick={() => setView('iso')}
-              title="Isometric 3D view"
-            >
-              3D
-            </button>
-            <button
-              className={`cam-btn ${view === 'top' ? 'on' : ''}`}
-              onClick={() => setView('top')}
-              title="Overhead 2D view"
-            >
-              2D
-            </button>
-            <button
-              className={`cam-btn ${autoRotate ? 'on' : ''}`}
-              onClick={() => setAutoRotate((v) => !v)}
-              title="Auto camera"
-            >
-              ⟳
-            </button>
-            <button
-              className="cam-btn"
-              onClick={() => setResetToken((t) => t + 1)}
-              title="Reset camera"
-            >
-              ⌂
-            </button>
-          </div>
 
           {toast && (
             <div className="dice-toast" data-color={toast.color}>
@@ -1047,8 +1029,23 @@ function DemoGame() {
           )}
         </div>
 
-        <aside className="side-rail">
-          <div className="side-block players-block">
+        <aside className={`side-rail ${detailsOpen ? 'mobile-open' : ''}`}>
+          <div className="sheet-head mobile-only">
+            <SheetTabs
+              active={sheetTab}
+              onChange={setSheetTab}
+              labels={{ players: 'Players', property: 'Property', log: 'Log' }}
+            />
+            <button
+              type="button"
+              className="sheet-close"
+              aria-label="Close details"
+              onClick={() => setDetailsOpen(false)}
+            >
+              ✕
+            </button>
+          </div>
+          <div className={`side-block players-block sheet-pane ${sheetTab === 'players' ? 'is-active' : ''}`}>
             <h3>Players ({s?.players.length ?? 0}/8)</h3>
             <div className="side-players">
               {s?.players.map((p, i) => (
@@ -1071,7 +1068,7 @@ function DemoGame() {
             </div>
           </div>
 
-          <div className="side-block deed-block">
+          <div className={`side-block deed-block sheet-pane ${sheetTab === 'property' ? 'is-active' : ''}`}>
             <h3>Property card</h3>
             {selectedTile != null && getTile(selectedTile) ? (
               <DemoDeedCard
@@ -1084,7 +1081,7 @@ function DemoGame() {
             )}
           </div>
 
-          <div className="side-block log-block">
+          <div className={`side-block log-block sheet-pane ${sheetTab === 'log' ? 'is-active' : ''}`}>
             <h3>Game log</h3>
             <div className="log-list">
               {s?.log
@@ -1114,6 +1111,56 @@ function DemoGame() {
             )}
           </div>
         </aside>
+
+        <ActionDock
+          info={{
+            isMyTurn,
+            currentName: current?.name ?? null,
+            currentColor: current?.color,
+            meCash: s.players.find((p) => p.seat === 0)?.cash,
+            myTileName: getTile(s.players.find((p) => p.seat === 0)?.tile ?? 0)?.name,
+            lastRoll: s.last
+              ? {
+                  dice: s.dice,
+                  total: s.last.diceTotal,
+                  byName: s.players[s.last.seat]?.name ?? 'Player',
+                }
+              : null,
+            status: turnStatusText,
+            busy: phase !== 'idle',
+          }}
+        >
+          {canRoll ? (
+            <button className="btn btn-primary btn-xl roll-btn" onClick={() => rollDice(store)}>
+              <IconDice /> Roll Dice
+              <span className="roll-hint">space</span>
+            </button>
+          ) : (
+            <div className={`turn-chip ${phase !== 'idle' ? 'busy' : ''}`}>{turnStatusText}</div>
+          )}
+          <div className="action-quick mobile-only">
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => {
+                setSheetTab('players')
+                setDetailsOpen(true)
+              }}
+            >
+              <IconUsers /> Players
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => {
+                setSheetTab('log')
+                setDetailsOpen(true)
+              }}
+            >
+              Game log
+            </button>
+          </div>
+        </ActionDock>
       </main>
 
       {chatOpen && (

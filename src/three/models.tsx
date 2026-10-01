@@ -3,7 +3,7 @@
  * All geometry is generated here (no external assets): tokens, houses,
  * hotels, card decks and coin props.
  */
-import { useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import type { ReactNode } from 'react'
 import * as THREE from 'three'
 import { useFrame } from '@react-three/fiber'
@@ -261,6 +261,155 @@ export function Token({
         <meshBasicMaterial color={c.light} transparent opacity={0} side={THREE.DoubleSide} />
       </mesh>
       {children}
+    </group>
+  )
+}
+
+/* ----------------------------------- dice ---------------------------------- */
+
+const PIP_PATTERN: Record<number, Array<[number, number]>> = {
+  1: [[0, 0]],
+  2: [
+    [-0.16, -0.16],
+    [0.16, 0.16],
+  ],
+  3: [
+    [-0.16, -0.16],
+    [0, 0],
+    [0.16, 0.16],
+  ],
+  4: [
+    [-0.16, -0.16],
+    [0.16, -0.16],
+    [-0.16, 0.16],
+    [0.16, 0.16],
+  ],
+  5: [
+    [-0.16, -0.16],
+    [0.16, -0.16],
+    [0, 0],
+    [-0.16, 0.16],
+    [0.16, 0.16],
+  ],
+  6: [
+    [-0.16, -0.16],
+    [0.16, -0.16],
+    [-0.16, 0],
+    [0.16, 0],
+    [-0.16, 0.16],
+    [0.16, 0.16],
+  ],
+}
+
+/** Pip world offsets per value, placed on the face that FACE_ROT brings upward. */
+function facePips(v: number): Array<[number, number, number]> {
+  const p = PIP_PATTERN[v] ?? PIP_PATTERN[1]!
+  switch (v) {
+    case 1:
+      return p.map(([a, b]) => [a, 0.33, b])
+    case 6:
+      return p.map(([a, b]) => [a, -0.33, b])
+    case 3:
+      return p.map(([a, b]) => [0.33, a, b])
+    case 4:
+      return p.map(([a, b]) => [-0.33, a, b])
+    case 2:
+      return p.map(([a, b]) => [a, b, 0.33])
+    default:
+      return p.map(([a, b]) => [a, b, -0.33])
+  }
+}
+
+const FACE_ROT: Record<number, [number, number, number]> = {
+  1: [0, 0, 0],
+  6: [Math.PI, 0, 0],
+  3: [0, 0, Math.PI / 2],
+  4: [0, 0, -Math.PI / 2],
+  2: [-Math.PI / 2, 0, 0],
+  5: [Math.PI / 2, 0, 0],
+}
+
+const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3)
+const smooth = (a: number, b: number, t: number) => {
+  const x = Math.min(Math.max((t - a) / (b - a), 0), 1)
+  return x * x * (3 - 2 * x)
+}
+
+/**
+ * A tumbling 3D die that ALWAYS settles showing `value` — the animation never
+ * decides the result, the authoritative dice do.
+ */
+export function Dice3D({
+  value,
+  pos,
+  trigger,
+  settleY = 0.42,
+}: {
+  value: number
+  /** [x, z] on the board plane. */
+  pos: [number, number]
+  trigger: number
+  settleY?: number
+}) {
+  const group = useRef<THREE.Group>(null)
+  const anim = useRef({ t0: 0, active: false })
+  const start = useMemo(() => new THREE.Vector3(pos[0], 5.4, pos[1]), [pos])
+  const end = useMemo(() => new THREE.Vector3(pos[0], settleY, pos[1]), [pos, settleY])
+  const tmpQ = useMemo(() => new THREE.Quaternion(), [])
+  const tmpQ2 = useMemo(() => new THREE.Quaternion(), [])
+  const tmpE = useMemo(() => new THREE.Euler(), [])
+  const faceE = useMemo(() => new THREE.Euler(), [])
+
+  useEffect(() => {
+    if (trigger > 0) anim.current = { t0: performance.now(), active: true }
+  }, [trigger])
+
+  useFrame(() => {
+    const g = group.current
+    if (!g) return
+    const a = anim.current
+    const D = 1.0
+    if (a.active) {
+      const t = (performance.now() - a.t0) / 1000
+      const p = Math.min(t / D, 1)
+      const e = easeOutCubic(p)
+      g.position.lerpVectors(start, end, e)
+      tmpE.set(t * 11, t * 14, t * 5)
+      tmpQ.setFromEuler(tmpE)
+      faceE.set(...(FACE_ROT[value] ?? FACE_ROT[1]!))
+      tmpQ2.setFromEuler(faceE)
+      g.quaternion.slerpQuaternions(tmpQ, tmpQ2, smooth(0.55, 0.95, p))
+      if (t > D && t < D + 0.28) {
+        const s = 1 + Math.sin(((t - D) / 0.28) * Math.PI) * 0.14
+        g.scale.setScalar(s)
+      } else {
+        g.scale.setScalar(1)
+      }
+      if (p >= 1) {
+        a.active = false
+        g.position.copy(end)
+        g.quaternion.copy(tmpQ2)
+        g.scale.setScalar(1)
+      }
+    } else {
+      const time = performance.now() / 1000
+      g.position.set(end.x, end.y + Math.sin(time * 1.7) * 0.03, end.z)
+      faceE.set(...(FACE_ROT[value] ?? FACE_ROT[1]!))
+      g.quaternion.slerp(tmpQ.setFromEuler(faceE), 0.18)
+    }
+  })
+
+  return (
+    <group ref={group} position={[pos[0], 5.4, pos[1]]}>
+      <RoundedBox args={[0.78, 0.78, 0.78]} radius={0.13} smoothness={4} castShadow>
+        <meshStandardMaterial color="#f7f1e3" roughness={0.28} />
+      </RoundedBox>
+      {facePips(value).map((p, i) => (
+        <mesh key={i} position={p}>
+          <sphereGeometry args={[0.062, 14, 14]} />
+          <meshStandardMaterial color="#31261a" roughness={0.5} />
+        </mesh>
+      ))}
     </group>
   )
 }
