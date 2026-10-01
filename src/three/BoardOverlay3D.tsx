@@ -31,6 +31,7 @@ import {
 } from '../board/geometry'
 import type { SceneStore } from '../board/types'
 import { CoinStack, Dice3D, Hotel, House, Token, tokenKindForSeat } from './models'
+import type { TokenKind } from './models'
 
 const DEV = import.meta.env.DEV
 
@@ -92,13 +93,15 @@ interface PawnProps {
   count: number
   seat: number
   color: PlayerColor
+  /** Chosen playing piece; falls back to a seat-derived default. */
+  token?: string
   isTurn: boolean
   progressRef: { current: number }
 }
 
-function Pawn3D({ from, to, slot, count, seat, color, isTurn, progressRef }: PawnProps) {
+function Pawn3D({ from, to, slot, count, seat, color, token, isTurn, progressRef }: PawnProps) {
   const group = useRef<THREE.Group>(null)
-  const kind = tokenKindForSeat(seat)
+  const kind: TokenKind = (token as TokenKind) ?? tokenKindForSeat(seat)
   const camera = useThree((s) => s.camera)
   const project = useMemo(() => new THREE.Vector3(), [])
 
@@ -316,6 +319,7 @@ function OverlayWorld({ store }: { store: SceneStore }) {
             count={list.length}
             seat={p.seat}
             color={p.color}
+            token={p.token}
             isTurn={p.id === currentPid}
             progressRef={progressRefs[p.seat] ?? { current: 1 }}
           />

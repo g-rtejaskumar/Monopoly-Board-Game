@@ -19,7 +19,8 @@ import type {
   AuctionState,
   DebtState,
 } from '../src/net/protocol'
-import { MAX_PLAYERS, START_CASH, START_BONUS, BOARD_SIZE, rollDie } from '../src/net/protocol'
+import { MAX_PLAYERS, START_CASH, START_BONUS, BOARD_SIZE, rollDie, TOKEN_IDS, isTokenId } from '../src/net/protocol'
+import type { TokenId } from '../src/net/protocol'
 import {
   TILES,
   isEventTile,
@@ -61,6 +62,12 @@ function sanitizeName(raw: unknown): string {
 }
 
 const BOT_NAMES = ['Botsby', 'Claire', 'Rooke', 'Dexter', 'Wren', 'Otto']
+
+/** First token id not already taken by a player in `room`. */
+function firstFreeToken(room: Room): TokenId {
+  const used = new Set(room.players.map((p) => p.token))
+  return TOKEN_IDS.find((t) => !used.has(t)) ?? 'hat'
+}
 
 /* --------------------------------- card decks --------------------------------- */
 
@@ -109,6 +116,7 @@ interface Member {
   id: string
   name: string
   color: string
+  token: TokenId
   isHost: boolean
   isBot: boolean
   ready: boolean
@@ -135,6 +143,7 @@ function roomSnapshot(room: Room): RoomSnapshot {
       id: p.id,
       name: p.name,
       color: p.color,
+      token: p.token,
       connected: p.connected,
       isHost: p.isHost,
       isBot: p.isBot,
@@ -283,6 +292,7 @@ function startGame(room: Room): void {
       cash: START_CASH,
       isBot: p.isBot,
       connected: p.connected,
+      token: p.token,
       getOutCards: 0,
       jailTurns: 0,
     })),
@@ -1459,62 +1469,135 @@ function doDebtPay(room: Room, playerId: string): void {
   settleIfCovered(room)
 }
 
-function doDeclareBankrupt(room: Room, playerId: string): void {
+/**
+ * Declare a winner from authoritative state once at most one non-bankrupt
+ * player remains. Bankruptcy (voluntary or debt-forced) is the ONLY thing that
+ * eliminates a player — a temporary disconnect during the reconnect grace MUST
+ * NOT count, so disconnected players still count as active here. Returns true
+ * when the game is now over.
+ */
+function checkWinner(room: Room): boolean {
   const g = room.game
-  if (!g || !g.debt || g.phase !== 'debt') return
-  if (g.debt.debtorId !== playerId) return
-  const p = g.players.find((pp) => pp.id === playerId)
-  if (!p) return
+  if (!g) return false
+  if (g.winner) return true
+  const alive = g.players.filter((p) => !p.bankrupt)
+  if (alive.length > 1) return false
+  const w = alive[0] ?? null
+  g.winner = w?.id ?? null
+  if (w) pushLog(g, w.color, `${w.name} wins the game! 🏆`)
+  // If nobody human is left connected, schedule teardown — bots alone must not
+  // become a zombie room (no socket will ever trigger cleanup).
+  const humansConnected = room.players.some((p) => !p.isBot && p.connected)
+  if (!humansConnected) scheduleRoomTeardown(room, 'game finished with no humans left')
+  return true
+}
 
-  const creditor = g.debt.creditorId ? g.players.find((pp) => pp.id === g.debt?.creditorId) : null
+/**
+ * Mark `p` bankrupt and dispose of their assets. Cash and deeds go to
+ * `creditor` (only when a debt rule demands it); otherwise everything returns
+ * to the bank. Buildings always return to the bank. Safe to call from any
+ * phase — it only mutates player/asset state, never the turn flow.
+ */
+function eliminatePlayer(room: Room, p: GamePlayer, creditor: GamePlayer | null): void {
+  const g = room.game as Game
+  if (p.bankrupt) return
   p.bankrupt = true
-  pushLog(g, '#ff6b8a', `${p.name} is bankrupt!`)
 
-  // Transfer assets: properties + cash to the creditor, or back to the bank.
   p.cash = Math.max(p.cash, 0)
   if (creditor) creditor.cash += p.cash
   p.cash = 0
+
+  const transferred = new Set<number>()
   for (const [idx, owner] of Object.entries(g.owned)) {
-    if (owner === p.id) {
-      if (creditor) g.owned[idx] = creditor.id
-      else delete g.owned[idx]
-    }
+    if (owner !== p.id) continue
+    const i = Number(idx)
+    if (creditor) g.owned[idx] = creditor.id
+    else delete g.owned[idx]
+    transferred.add(i)
   }
-  // Buildings return to the bank (creditor may rebuild).
+  // Buildings return to the bank even on deeds handed to a creditor (they may
+  // rebuild under the normal even-build rules).
   for (const idx of Object.keys(g.buildings)) {
-    if (g.owned[Number(idx)] !== p.id) continue
-    if (!creditor) delete g.buildings[Number(idx)]
+    if (transferred.has(Number(idx)) || g.owned[Number(idx)] === p.id) delete g.buildings[Number(idx)]
   }
   for (const idx of Object.keys(g.mortgaged)) {
-    if (g.owned[Number(idx)] !== p.id) continue
-    if (!creditor) delete g.mortgaged[Number(idx)]
+    if (g.owned[Number(idx)] === p.id) delete g.mortgaged[Number(idx)]
   }
   if (creditor) creditor.getOutCards = (creditor.getOutCards ?? 0) + (p.getOutCards ?? 0)
   p.getOutCards = 0
-  g.debt = null
 
-  // Winner check.
-  const alive = g.players.filter((pp) => !pp.bankrupt)
-  if (alive.length <= 1) {
-    g.winner = alive[0]?.id ?? null
-    const w = alive[0]
-    if (w) pushLog(g, w.color, `${w.name} wins the game! 🏆`)
-    // If nobody human is left connected, schedule teardown — bots alone must
-    // not become a zombie room (no socket will ever trigger cleanup).
-    const humansConnected = room.players.some((p) => !p.isBot && p.connected)
-    if (!humansConnected) scheduleRoomTeardown(room, 'game finished with no humans left')
-  }
-  broadcastGame(room)
-  if (!g.winner) {
-    nextTurn(room)
-    broadcastGame(room)
-    scheduleBot(room)
-  } else {
-    // A completed game accepts no further actions (do* guards check g.winner),
-    // and no timers may outlive it — clear them all now.
-    clearBotTimer(room)
+  // Cancel any pending trade involving the eliminated player.
+  if (g.trade && (g.trade.fromId === p.id || g.trade.toId === p.id)) {
+    g.trade = null
     clearTradeTimer(room)
   }
+  // Drop them from the live auction standings.
+  if (g.auction && g.auction.highestBidder === p.id) {
+    g.auction.highestBidder = null
+    g.auction.highest = 0
+  }
+}
+
+/** Clear any pending prompt so a bankrupt player's turn cannot wedge the game. */
+function clearPendingAction(g: Game): void {
+  g.buyTile = null
+  g.eventTile = null
+  g.eventText = null
+  g.pendingCard = null
+  g.debt = null
+}
+
+/**
+ * Bankruptcy / voluntary surrender. The debtor may declare during a debt phase;
+ * any active player may surrender at any other time (Manage Assets → Surrender).
+ * The server resolves assets, the turn handover and the winner; the client only
+ * sends the intent.
+ */
+function doDeclareBankrupt(room: Room, playerId: string): void {
+  const g = room.game
+  if (!g || g.winner) return
+  const p = g.players.find((pp) => pp.id === playerId)
+  if (!p || p.bankrupt) return
+  // During debt only the debtor may declare.
+  if (g.phase === 'debt' && g.debt?.debtorId !== playerId) return
+
+  const creditor =
+    g.phase === 'debt' && g.debt?.creditorId
+      ? g.players.find((pp) => pp.id === g.debt?.creditorId) ?? null
+      : null
+  const wasCurrent = g.players[g.current]?.id === playerId
+  const wasAuctionBidder = g.phase === 'auction' && g.auction?.bidder === playerId
+
+  eliminatePlayer(room, p, creditor)
+  pushLog(g, '#ff6b8a', `${p.name} declared bankruptcy and is out!`)
+  g.debt = null
+
+  if (checkWinner(room)) {
+    clearBotTimer(room)
+    clearTradeTimer(room)
+    broadcastGame(room)
+    return
+  }
+
+  // If the eliminated player did not own the current prompt, leave it alone and
+  // let the rest of the table continue.
+  if (!wasCurrent) {
+    broadcastGame(room)
+    return
+  }
+
+  // The eliminated player owned the current prompt. An auction can resolve
+  // safely by treating them as having passed; every other prompt is discarded
+  // and the turn moves on.
+  if (wasAuctionBidder && g.auction) {
+    doAuctionPass(room, p.id)
+    return
+  }
+  clearPendingAction(g)
+  g.phase = 'idle'
+  nextTurn(room)
+  broadcastGame(room)
+  scheduleBot(room)
 }
 
 /* ------------------------------------ chat ------------------------------------ */
@@ -1585,6 +1668,7 @@ export class RoomManager {
       id: m.id,
       name: m.name,
       color: m.color,
+      token: m.token,
       connected: m.connected,
       isHost: m.isHost,
       isBot: m.isBot,
@@ -1600,6 +1684,7 @@ export class RoomManager {
       id,
       name: clean,
       color: COLORS[this.members.size % COLORS.length],
+      token: 'hat',
       isHost: false,
       isBot: false,
       ready: false,
@@ -1622,6 +1707,7 @@ export class RoomManager {
     m.isHost = true
     m.ready = true
     m.color = COLORS[0]
+    if (m.token !== 'hat') m.token = firstFreeToken(room)
     this.rooms.set(code, room)
     log(`room ${code}: created by ${m.name}`)
     return { code }
@@ -1643,6 +1729,7 @@ export class RoomManager {
     m.isHost = false
     m.ready = false
     m.color = COLORS[room.players.length % COLORS.length]
+    m.token = firstFreeToken(room)
     room.players.push(m)
     clearLobbyTeardownTimer(room)
     log(`room ${code}: ${m.name} joined (${room.players.length}/${MAX_PLAYERS})`)
@@ -1668,6 +1755,7 @@ export class RoomManager {
       id: makeId('bot'),
       name,
       color: COLORS[room.players.length % COLORS.length],
+      token: firstFreeToken(room),
       isHost: false,
       isBot: true,
       ready: true,
@@ -1688,6 +1776,40 @@ export class RoomManager {
     if (!room || room.started) return
     m.ready = ready
     broadcastRoom(room)
+  }
+
+  /**
+   * Update a member's display name. Used to correct a stale/default hello name
+   * before creating or joining. Names are locked once a game is in progress so
+   * a reconnect can never silently rename a seated player.
+   */
+  setName(playerId: string, raw: string): { ok: true } | { error: ErrCode; message: string } {
+    const m = this.members.get(playerId)
+    if (!m) return { error: 'badName', message: 'Say hello first' }
+    const clean = sanitizeName(raw)
+    if (clean.length < 2) return { error: 'badName', message: 'Name must be at least 2 characters' }
+    const room = this.getRoomOf(m)
+    if (room?.started) return { error: 'notAllowed', message: 'Names cannot change mid-game' }
+    m.name = clean
+    m.send?.({ t: 'you', playerId: m.id, name: clean })
+    if (room) broadcastRoom(room)
+    return { ok: true }
+  }
+
+  /** Choose a playing piece before the game starts. One token per player. */
+  selectToken(playerId: string, token: unknown): { ok: true } | { error: ErrCode; message: string } {
+    const m = this.members.get(playerId)
+    if (!m) return { error: 'badName', message: 'Say hello first' }
+    if (!isTokenId(token)) return { error: 'notAllowed', message: 'Unknown token' }
+    const room = this.getRoomOf(m)
+    if (!room) return { error: 'roomNotFound', message: 'Join a room first' }
+    if (room.started) return { error: 'tokenLocked', message: 'Tokens are locked once the game starts' }
+    if (m.token === token) return { ok: true }
+    const taken = room.players.some((p) => p.id !== m.id && p.token === token)
+    if (taken) return { error: 'tokenTaken', message: 'That token is already taken' }
+    m.token = token
+    broadcastRoom(room)
+    return { ok: true }
   }
 
   start(playerId: string): { ok: true } | { error: ErrCode; message: string } {
@@ -1793,7 +1915,13 @@ export class RoomManager {
 
   /* --------------------------- lifecycle --------------------------- */
 
-  leave(playerId: string): void {
+  /**
+   * Leave a room. `explicit` means the player asked to leave (Leave button or
+   * room change): the seat is forfeited immediately and membership is removed
+   * so a new room can be created/joined without an "Already in room" error. A
+   * plain socket drop (explicit = false) keeps the reconnect grace seat.
+   */
+  leave(playerId: string, explicit = false): void {
     const m = this.members.get(playerId)
     if (!m) return
     const room = this.getRoomOf(m)
@@ -1802,6 +1930,25 @@ export class RoomManager {
       return
     }
     if (room.started && room.game) {
+      if (explicit) {
+        // Keep m.send (the live socket) and the member identity: the player is
+        // leaving the room, not the server, so they can immediately create or
+        // join another room on this connection.
+        const gp = room.game.players.find((x) => x.id === m.id)
+        if (gp) gp.connected = false
+        const rt = reapTimers.get(m.id)
+        if (rt) {
+          clearTimeout(rt)
+          reapTimers.delete(m.id)
+        }
+        // A permanent departure forfeits the seat: eliminate and resolve winner.
+        if (!room.game.winner && gp && !gp.bankrupt) doDeclareBankrupt(room, m.id)
+        // Keep the player's identity on this socket so they can immediately
+        // create or join another room (this was the "Already in room"/dead
+        // Create Room bug).
+        this.removeMember(m, 'left the game', true)
+        return
+      }
       m.connected = false
       m.send = null
       const gp = room.game.players.find((gp2) => gp2.id === m.id)
@@ -1852,6 +1999,9 @@ export class RoomManager {
         scheduleRoomTeardown(room, 'all humans left the game', ROOM_ABANDON_MS)
       }
       log(`room ${room.code}: ${m.name} disconnected (seat held)`)
+    } else if (explicit) {
+      // Lobby leave: keep the identity so the same socket can create/join again.
+      this.removeMember(m, 'left lobby', true)
     } else {
       this.removeMember(m, 'left lobby')
     }
@@ -1870,14 +2020,22 @@ export class RoomManager {
     this.leave(playerId)
   }
 
-  private removeMember(m: Member, reason: string): void {
+  private removeMember(m: Member, reason: string, keepIdentity = false): void {
     const room = this.getRoomOf(m)
     if (!room) {
-      this.members.delete(m.id)
+      if (!keepIdentity) this.members.delete(m.id)
       return
     }
     room.players = room.players.filter((p) => p.id !== m.id)
-    this.members.delete(m.id)
+    if (keepIdentity) {
+      // The player asked to leave: reset their room-scoped flags but keep the
+      // member record so they can start or join a new room on this connection.
+      m.isHost = false
+      m.ready = false
+      m.connected = true
+    } else {
+      this.members.delete(m.id)
+    }
     if (room.hostId === m.id && room.players.length > 0) {
       const nextHost = room.players.find((p) => !p.isBot) ?? room.players[0]
       if (nextHost) {

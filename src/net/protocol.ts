@@ -13,6 +13,41 @@ export const MAX_PLAYERS = 8
 /** Dice are always rolled by the server. */
 export type Dice = [number, number]
 
+/* ---------------------------------- tokens --------------------------------- */
+
+/**
+ * The eight original BoardQuest playing pieces. Ids are stable wire values;
+ * the 3D models are procedurally generated (see src/three/models.tsx) so no
+ * third-party or proprietary assets are shipped. One token per player.
+ */
+export const TOKEN_IDS = [
+  'hat',
+  'car',
+  'ship',
+  'dog',
+  'boot',
+  'thimble',
+  'barrow',
+  'cat',
+] as const
+export type TokenId = (typeof TOKEN_IDS)[number]
+
+/** Human-readable names for the token picker UI. */
+export const TOKEN_LABELS: Record<TokenId, string> = {
+  hat: 'Top Hat',
+  car: 'Race Car',
+  ship: 'Battleship',
+  dog: 'Scottie Dog',
+  boot: 'Boot',
+  thimble: 'Thimble',
+  barrow: 'Wheelbarrow',
+  cat: 'Cat',
+}
+
+export function isTokenId(v: unknown): v is TokenId {
+  return typeof v === 'string' && (TOKEN_IDS as readonly string[]).includes(v)
+}
+
 /* --------------------------------- identity --------------------------------- */
 
 export interface PlayerPublic {
@@ -20,6 +55,8 @@ export interface PlayerPublic {
   id: string
   name: string
   color: string
+  /** Chosen playing piece (defaults are assigned on join). */
+  token: TokenId
   /** Present in lobby/game; false for bots. */
   connected: boolean
   isHost: boolean
@@ -71,8 +108,11 @@ export interface DebtState {
 /** Client → server. */
 export type ClientMsg =
   | { t: 'hello'; name: string; playerId?: string }
+  /** Update the display name before/without rejoining (lobby only). */
+  | { t: 'setName'; name: string }
   | { t: 'create' }
   | { t: 'join'; code: string }
+  | { t: 'selectToken'; token: TokenId }
   | { t: 'ready'; ready: boolean }
   | { t: 'addBot' }
   | { t: 'start' }
@@ -119,6 +159,9 @@ export type ErrCode =
   | 'badBid'
   | 'insufficient'
   | 'notAllowed'
+  | 'tokenTaken'
+  | 'tokenLocked'
+  | 'inRoom'
 
 export interface ChatMessage {
   id: number
@@ -147,6 +190,8 @@ export interface GamePlayer {
   cash: number
   isBot: boolean
   connected: boolean
+  /** Chosen playing piece (mirrors PlayerPublic.token). */
+  token?: TokenId
   /** True when the player is in jail (sits on the JAIL corner until doubles/free). */
   inJail?: boolean
   /** Failed jail-roll attempts this jail stay (3rd forces the M 50 fine). */

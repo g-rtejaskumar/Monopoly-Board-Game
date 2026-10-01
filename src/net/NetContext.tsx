@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { GameSnapshot, RoomSnapshot, TradePayload } from './protocol'
+import type { GameSnapshot, RoomSnapshot, TradePayload, TokenId } from './protocol'
 import { NetClient, getNet, loadNetIdentity } from './NetClient'
 import type { NetStatus } from './NetClient'
 
@@ -22,6 +22,7 @@ interface NetContextValue {
   createRoom: () => void
   joinRoom: (code: string) => void
   setReady: (ready: boolean) => void
+  selectToken: (token: TokenId) => void
   addBot: () => void
   startGame: () => void
   roll: () => void
@@ -119,11 +120,14 @@ export function NetProvider({ children }: { children: ReactNode }) {
   const ensureConnected = useCallback((name: string) => {
     desiredName.current = name
     const client = getNet(name)
-    if (client.name !== name && client.status === 'closed') {
-      client.name = name
-    }
+    // The singleton may already exist from a previous session with a stale name
+    // (this was the source of players showing up as "test"/"Player"). Always
+    // adopt the name the user just typed — pushing it to the server when the
+    // socket is already open.
+    client.name = name
     netRef.current = client
     setNet(client)
+    if (client.status === 'open') client.setName(name)
     client.connect()
   }, [])
 
@@ -138,6 +142,10 @@ export function NetProvider({ children }: { children: ReactNode }) {
   const createRoom = useCallback(() => viaRef((c) => c.send({ t: 'create' })), [viaRef])
   const joinRoom = useCallback((code: string) => viaRef((c) => c.send({ t: 'join', code })), [viaRef])
   const setReady = useCallback((ready: boolean) => viaRef((c) => c.send({ t: 'ready', ready })), [viaRef])
+  const selectToken = useCallback(
+    (token: TokenId) => viaRef((c) => c.send({ t: 'selectToken', token })),
+    [viaRef],
+  )
   const addBot = useCallback(() => viaRef((c) => c.send({ t: 'addBot' })), [viaRef])
   const startGame = useCallback(() => viaRef((c) => c.send({ t: 'start' })), [viaRef])
   const roll = useCallback(() => viaRef((c) => c.send({ t: 'roll' })), [viaRef])
@@ -181,6 +189,7 @@ export function NetProvider({ children }: { children: ReactNode }) {
       createRoom,
       joinRoom,
       setReady,
+      selectToken,
       addBot,
       startGame,
       roll,
@@ -202,7 +211,7 @@ export function NetProvider({ children }: { children: ReactNode }) {
       leaveRoom,
       dismissError,
     }),
-    [net, status, room, game, youId, error, ensureConnected, createRoom, joinRoom, setReady, addBot, startGame, roll, buy, eventOk, build, sellBuilding, mortgage, unmortgage, jailAction, tradePropose, tradeRespond, tradeCancel, auctionBid, auctionPass, debtPay, declareBankrupt, playAgain, leaveRoom, dismissError],
+    [net, status, room, game, youId, error, ensureConnected, createRoom, joinRoom, setReady, selectToken, addBot, startGame, roll, buy, eventOk, build, sellBuilding, mortgage, unmortgage, jailAction, tradePropose, tradeRespond, tradeCancel, auctionBid, auctionPass, debtPay, declareBankrupt, playAgain, leaveRoom, dismissError],
   )
 
   return <NetContext.Provider value={value}>{children}</NetContext.Provider>

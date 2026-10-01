@@ -8,8 +8,27 @@ code, and play with friends in the browser. Built with React, TypeScript, Three.
 
 - **Landing** — animated hero with a floating 3D board, Play With Friends / Create / Join flows
 - **Lobby** — live room code sharing, real-time player slots, ready-up, practice rivals
-- **Game board** — isometric 3D board with 40 classic-layout tiles, tumbling dice, hopping pawns,
-  turn system, title-deed buy modal, trading/mortgages/auctions, surprise events, game log and table chat
+- **Game board** — fixed 2D board with 40 classic-layout tiles (colour-group bands, distinct
+  corners), a selective 3D layer for tokens, dice, houses/hotels and cards, turn system,
+  title-deed buy modal, trading/mortgages/auctions, surprise events, game log and table chat
+
+## Game rules & controls
+
+- **Names** — you enter a display name before creating *or* joining a room. Whitespace is
+  trimmed, names are 2–14 characters, and your identity (a server-assigned id) is separate from
+  the name so a reconnect never renames you. Duplicate display names are allowed; identities
+  remain distinct.
+- **Tokens** — in the lobby every player picks one of eight playing pieces (Top Hat, Race Car,
+  Battleship, Scottie Dog, Boot, Thimble, Wheelbarrow, Cat). Tokens are unique per room, sync live
+  to everyone, and lock when the host starts. The chosen piece is the actual 3D model on the board.
+- **Manage assets** — the gear button opens a panel listing your deeds and cash. **Declare
+  bankruptcy** there to surrender: a confirmation dialog explains that you are eliminated and your
+  cash/deeds return to the bank (or to a creditor you owe). Bankruptcy is irreversible for the game.
+- **Winning** — the game ends automatically when only one non-bankrupt player remains (whether
+  others went bankrupt or left permanently). Every client shows the winner, final balances and the
+  option to play again (host) or return home. A temporary disconnect never counts as elimination.
+- **Leaving** — *Leave* releases your seat and identity immediately, so you can create or join a
+  new room right away. Room state is held in memory only.
 
 ## Architecture
 

@@ -54,7 +54,12 @@ function tileLabel(tile: BoardTile): string {
  */
 function tileAbbrev(tile: BoardTile): string {
   const label = tileLabel(tile)
+  // Specials keep their whole (already short) word: START, JAIL, CHANCE…
+  if (tile.type !== 'property' && tile.type !== 'railroad' && tile.type !== 'utility') {
+    return label.toUpperCase()
+  }
   const words = label.split(/[\s-]+/).filter(Boolean)
+  // Multi-word names → initials (Lighthouse Lane → LL); single words → first 3.
   if (words.length > 1) return words.map((w) => w[0]?.toUpperCase() ?? '').join('')
   return label.slice(0, 3).toUpperCase()
 }

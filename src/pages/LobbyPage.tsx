@@ -6,8 +6,21 @@ import { MAX_PLAYERS, MIN_PLAYERS, PLAYER_COLORS } from '../game/types'
 import type { PlayerColor } from '../game/types'
 import { useNet } from '../net/NetContext'
 import { ConnBanner, ModeBadge } from '../components/ConnectionState'
-import type { RoomSnapshot } from '../net/protocol'
+import { TOKEN_IDS, TOKEN_LABELS } from '../net/protocol'
+import type { RoomSnapshot, TokenId } from '../net/protocol'
 import './LobbyPage.css'
+
+/** Small glyphs for the token picker (labels carry the real meaning). */
+const TOKEN_GLYPH: Record<TokenId, string> = {
+  hat: '🎩',
+  car: '🏎️',
+  ship: '🚢',
+  dog: '🐕',
+  boot: '👢',
+  thimble: '🪡',
+  barrow: '🛒',
+  cat: '🐈',
+}
 
 export function LobbyPage() {
   const navigate = useNavigate()
@@ -158,16 +171,17 @@ function ServerLobby({ code, room }: { code: string; room: RoomSnapshot }) {
                         {p.isBot && <span className="chip bot-chip">bot</span>}
                       </span>
                       <span className="slot-sub">
+                        <span className="slot-token" title="Playing piece">
+                          {TOKEN_GLYPH[p.token]} {TOKEN_LABELS[p.token]}
+                        </span>
                         {p.isBot ? (
-                          'Practice rival'
+                          ' · practice rival'
                         ) : p.connected === false ? (
-                          <span className="offline-badge">● reconnecting…</span>
+                          <span className="offline-badge"> · ● reconnecting…</span>
                         ) : p.ready ? (
-                          <span className="ready-badge">
-                            <IconCheck /> Ready
-                          </span>
+                          <span className="ready-badge"> · <IconCheck /> Ready</span>
                         ) : (
-                          'Picking a token…'
+                          ' · not ready'
                         )}
                       </span>
                     </div>
@@ -200,6 +214,40 @@ function ServerLobby({ code, room }: { code: string; room: RoomSnapshot }) {
               <button className="btn add-bot ready-toggle on" onClick={() => net.setReady(true)}>
                 <IconCheck /> I'm ready
               </button>
+            )}
+          </section>
+
+          <section className="token-card panel">
+            <div className="slots-head">
+              <h2>Your token</h2>
+            </div>
+            <p className="room-hint">Pick your playing piece — one each, locked when the game starts.</p>
+            <div className="token-grid">
+              {TOKEN_IDS.map((tk) => {
+                const owner = players.find((p) => p.token === tk)
+                const mine = me?.token === tk
+                const takenByOther = Boolean(owner && owner.id !== net.youId)
+                return (
+                  <button
+                    key={tk}
+                    type="button"
+                    className={`token-option ${mine ? 'selected' : ''} ${takenByOther ? 'taken' : ''}`}
+                    disabled={takenByOther || !me || me.isBot}
+                    onClick={() => net.selectToken(tk)}
+                    title={owner ? `${TOKEN_LABELS[tk]} — ${owner.name}` : TOKEN_LABELS[tk]}
+                    aria-pressed={mine}
+                  >
+                    <span className="token-glyph" aria-hidden="true">
+                      {TOKEN_GLYPH[tk]}
+                    </span>
+                    <span className="token-name">{TOKEN_LABELS[tk]}</span>
+                    {owner && <span className="token-owner">{mine ? 'you' : owner.name}</span>}
+                  </button>
+                )
+              })}
+            </div>
+            {net.error && (net.error.code === 'tokenTaken' || net.error.code === 'tokenLocked') && (
+              <p className="error-text">{net.error.message}</p>
             )}
           </section>
 

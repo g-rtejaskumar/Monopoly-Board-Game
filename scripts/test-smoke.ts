@@ -597,11 +597,10 @@ async function main(): Promise<void> {
     }
     bob.close()
 
-    // 11) clean disconnect: mid-game leave holds the seat for a grace window…
+    // 11) clean disconnect: a transport DROP (no leave request) holds the seat
+    // for a grace window so a reconnect re-binds the SAME seat…
     const oldId = alice.playerId
     const leftAt = Date.now()
-    alice.send({ t: 'leaveRoom' })
-    await sleep(300)
     alice.close()
 
     // …so an immediate reconnection must re-bind the SAME seat.
@@ -609,6 +608,21 @@ async function main(): Promise<void> {
     probe1.send({ t: 'hello', name: 'SmokeAlice', playerId: oldId })
     await probe1.waitFor((m) => m.t === 'you', 8000)
     check('seat is held during the reconnect grace window', probe1.playerId === oldId)
+
+    // Regression: an EXPLICIT leave must free membership immediately so the
+    // player can start a new room without an "Already in room" error.
+    probe1.send({ t: 'leaveRoom' })
+    await sleep(300)
+    const probe1b = new Bot(`ws://127.0.0.1:${port}/ws`)
+    probe1b.send({ t: 'hello', name: 'SmokeAlice', playerId: oldId })
+    await probe1b.waitFor((m) => m.t === 'you', 8000)
+    check('explicit leave releases the seat (fresh identity on reconnect)', probe1b.playerId !== oldId)
+    probe1b.send({ t: 'create' })
+    const created = await probe1b.waitFor((m) => m.t === 'created' || m.t === 'err', 8000)
+    check('a player who left can create a new room immediately', created.t === 'created')
+    probe1b.send({ t: 'leaveRoom' })
+    await sleep(300)
+    probe1b.close()
     probe1.close()
 
     // 12) with no humans left, the room must be closed after the grace period

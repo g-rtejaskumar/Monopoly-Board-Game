@@ -30,7 +30,9 @@ export function LandingPage() {
   )
 
   const stored = useMemo(() => loadNetIdentity(), [])
-  const nameOk = name.trim().length > 0
+  // The server requires at least 2 characters; mirror that so the UI can guide
+  // the player before a request is ever sent.
+  const nameOk = sanitizeName(name).length >= 2
 
   useEffect(() => {
     if (stored) setName(stored.name)
@@ -45,18 +47,21 @@ export function LandingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inviteCode])
 
-  const goCreate = useCallback(() => {
-    if (!nameOk) {
-      setPanel('create')
-      return
-    }
+  // Opening the create panel ALWAYS asks for a name first — the host is never
+  // silently given a default one.
+  const openCreate = useCallback(() => {
+    setPanel('create')
+    setCodeError(null)
+  }, [])
+
+  const createNow = useCallback(() => {
+    if (!nameOk) return
     setCreating(true)
-    net.ensureConnected(sanitizeName(name))
-    // Give the socket a beat to open, then ask for a room.
-    window.setTimeout(() => {
-      net.createRoom()
-      setCreating(false)
-    }, 450)
+    const clean = sanitizeName(name)
+    net.ensureConnected(clean)
+    // Requests are queued on the socket and flushed after the hello handshake,
+    // so this is safe even on the very first click (no timer race).
+    net.createRoom()
   }, [name, nameOk, net])
 
   const goJoin = useCallback(
@@ -73,9 +78,7 @@ export function LandingPage() {
       }
       setCodeError(null)
       net.ensureConnected(sanitizeName(name))
-      window.setTimeout(() => {
-        net.joinRoom(c)
-      }, 450)
+      net.joinRoom(c)
     },
     [code, name, nameOk, net],
   )
@@ -138,7 +141,7 @@ export function LandingPage() {
             </p>
 
             <div className="hero-cta">
-              <button className="btn btn-primary btn-xl" onClick={goCreate}>
+              <button className="btn btn-primary btn-xl" onClick={openCreate}>
                 <IconPlus /> Play With Friends
               </button>
               <button className="btn btn-lg" onClick={() => openPanel('join')}>
@@ -190,18 +193,28 @@ export function LandingPage() {
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    if (panel === 'create') goCreate()
+                    if (panel === 'create') createNow()
                     else goJoin()
                   }
                 }}
               />
+              {!nameOk && (
+                <p className="error-text">Enter a name (at least 2 characters).</p>
+              )}
 
               {panel === 'create' ? (
                 <>
                   <p className="panel-hint">
                     You'll be the host. Share the room code with friends after the lobby opens.
                   </p>
-                  <button className="btn btn-primary btn-lg panel-cta" disabled={creating} onClick={goCreate}>
+                  {net.error && net.error.code !== 'roomNotFound' && (
+                    <p className="error-text">{net.error.message}</p>
+                  )}
+                  <button
+                    className="btn btn-primary btn-lg panel-cta"
+                    disabled={creating || !nameOk}
+                    onClick={createNow}
+                  >
                     {creating ? (
                       <>
                         <span className="spinner" /> Opening room…

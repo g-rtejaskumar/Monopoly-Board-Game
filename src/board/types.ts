@@ -15,6 +15,8 @@ export interface ScenePlayer {
   name: string
   seat: number
   color: PlayerColor
+  /** Chosen playing piece id (optional in practice/demo mode). */
+  token?: string
   tile: number
   cash: number
   connected?: boolean

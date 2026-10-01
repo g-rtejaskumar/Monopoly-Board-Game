@@ -192,6 +192,19 @@ export class NetClient {
     if (!this.rawSend(msg)) this.queue.push(msg)
   }
 
+  /**
+   * Change the display name. If the socket is already open the server must be
+   * told explicitly (hello is only honoured once per connection); otherwise the
+   * next hello picks up the new name.
+   */
+  setName(name: string): void {
+    this.name = name
+    if (this.identity) this.identity = { ...this.identity, name }
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.rawSend({ t: 'setName', name })
+    }
+  }
+
   /** Forget the old identity (used on hard errors like a taken/invalid seat). */
   resetIdentity(): void {
     this.identity = null

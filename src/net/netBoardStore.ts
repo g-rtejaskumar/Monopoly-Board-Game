@@ -21,13 +21,15 @@
 import { PLAYER_COLORS } from '../game/types'
 import type { PlayerColor } from '../game/types'
 import { BOARD_SIZE } from './protocol'
-import type { GameSnapshot, GamePlayer } from './protocol'
+import type { GameSnapshot, GamePlayer, TokenId } from './protocol'
 
 export interface BoardPlayer {
   id: string
   name: string
   seat: number
   color: PlayerColor
+  /** Chosen playing piece id (undefined in practice/demo mode). */
+  token?: TokenId
   tile: number
   cash: number
   connected?: boolean
@@ -140,6 +142,7 @@ function fromSnapshot(g: GameSnapshot): BoardStateShape {
     name: p.name,
     seat: typeof p.seat === 'number' ? p.seat : i,
     color: asColor(p.color),
+    token: p.token,
     tile: p.tile,
     cash: p.cash,
     connected: p.connected,

@@ -10,123 +10,104 @@ import { useFrame } from '@react-three/fiber'
 import { Html, RoundedBox } from '@react-three/drei'
 import { PLAYER_COLORS } from '../game/types'
 import type { PlayerColor } from '../game/types'
+import { TOKEN_IDS } from '../net/protocol'
+import type { TokenId } from '../net/protocol'
 
 /* --------------------------------- tokens --------------------------------- */
 
-export const TOKEN_KINDS = [
-  'crown',
-  'rocket',
-  'knight',
-  'robot',
-  'cat',
-  'car',
-  'wizard',
-  'dragon',
-] as const
-export type TokenKind = (typeof TOKEN_KINDS)[number]
+/**
+ * The eight original BoardQuest playing pieces. Every model below is built
+ * from primitive geometry in this file — no third-party or licensed assets.
+ */
+export const TOKEN_KINDS = TOKEN_IDS
+export type TokenKind = TokenId
 
+/** Fallback piece for a seat with no chosen token (practice/demo mode). */
 export function tokenKindForSeat(seat: number): TokenKind {
-  return TOKEN_KINDS[seat % TOKEN_KINDS.length] ?? 'crown'
+  return TOKEN_IDS[seat % TOKEN_IDS.length] ?? 'hat'
 }
 
 function TokenShape({ kind, hex, light }: { kind: TokenKind; hex: string; light: string }) {
   switch (kind) {
-    case 'crown':
+    case 'hat':
       return (
         <group>
-          <mesh castShadow position={[0, 0.16, 0]}>
-            <cylinderGeometry args={[0.19, 0.23, 0.16, 10]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+          <mesh castShadow position={[0, 0.03, 0]}>
+            <cylinderGeometry args={[0.24, 0.26, 0.05, 18]} />
+            <meshStandardMaterial color={hex} roughness={0.25} metalness={0.55} />
           </mesh>
-          {[0, 1, 2, 3, 4].map((i) => {
-            const a = (i / 5) * Math.PI * 2
-            return (
-              <mesh key={i} castShadow position={[Math.cos(a) * 0.16, 0.3, Math.sin(a) * 0.16]}>
-                <coneGeometry args={[0.055, 0.14, 8]} />
-                <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
-              </mesh>
-            )
-          })}
-          <mesh castShadow position={[0, 0.3, 0]}>
-            <sphereGeometry args={[0.05, 10, 10]} />
-            <meshStandardMaterial color={light} roughness={0.2} emissive={light} emissiveIntensity={0.35} />
+          <mesh castShadow position={[0, 0.2, 0]}>
+            <cylinderGeometry args={[0.16, 0.17, 0.34, 18]} />
+            <meshStandardMaterial color={hex} roughness={0.25} metalness={0.55} />
+          </mesh>
+          <mesh position={[0, 0.1, 0]}>
+            <cylinderGeometry args={[0.171, 0.171, 0.05, 18]} />
+            <meshStandardMaterial color={light} roughness={0.2} emissive={light} emissiveIntensity={0.4} />
           </mesh>
         </group>
       )
-    case 'rocket':
+    case 'ship':
       return (
-        <group>
-          <mesh castShadow position={[0, 0.22, 0]}>
-            <cylinderGeometry args={[0.09, 0.13, 0.3, 12]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+        <group rotation={[0, Math.PI / 2, 0]}>
+          <mesh castShadow position={[0, 0.12, 0]}>
+            <boxGeometry args={[0.18, 0.14, 0.42]} />
+            <meshStandardMaterial color={hex} roughness={0.3} metalness={0.4} />
           </mesh>
-          <mesh castShadow position={[0, 0.47, 0]}>
-            <coneGeometry args={[0.09, 0.2, 12]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+          <mesh castShadow position={[0, 0.2, -0.02]}>
+            <boxGeometry args={[0.13, 0.1, 0.15]} />
+            <meshStandardMaterial color={hex} roughness={0.3} metalness={0.4} />
           </mesh>
-          {[0, 1, 2].map((i) => {
-            const a = (i / 3) * Math.PI * 2
-            return (
-              <mesh
-                key={i}
-                castShadow
-                position={[Math.cos(a) * 0.12, 0.1, Math.sin(a) * 0.12]}
-                rotation={[0, -a, 0.4]}
-              >
-                <boxGeometry args={[0.03, 0.14, 0.1]} />
-                <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
-              </mesh>
-            )
-          })}
-          <mesh position={[0, 0.36, 0]}>
-            <sphereGeometry args={[0.045, 10, 10]} />
-            <meshStandardMaterial color={light} emissive={light} emissiveIntensity={0.7} />
+          <mesh castShadow position={[0, 0.31, -0.02]}>
+            <cylinderGeometry args={[0.035, 0.045, 0.13, 10]} />
+            <meshStandardMaterial color={light} roughness={0.25} metalness={0.45} />
+          </mesh>
+          <mesh position={[0, 0.21, 0.16]}>
+            <boxGeometry args={[0.11, 0.02, 0.09]} />
+            <meshStandardMaterial color={light} emissive={light} emissiveIntensity={0.5} />
           </mesh>
         </group>
       )
-    case 'knight':
+    case 'dog':
       return (
-        <group>
-          <mesh castShadow position={[0, 0.1, 0]}>
-            <cylinderGeometry args={[0.16, 0.2, 0.12, 10]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+        <group rotation={[0, Math.PI / 6, 0]}>
+          <mesh castShadow position={[0, 0.18, 0]} rotation={[0, 0, Math.PI / 2]}>
+            <capsuleGeometry args={[0.08, 0.2, 4, 10]} />
+            <meshStandardMaterial color={hex} roughness={0.32} metalness={0.3} />
           </mesh>
-          <mesh castShadow position={[0, 0.26, -0.02]} rotation={[0.35, 0, 0]}>
-            <boxGeometry args={[0.14, 0.3, 0.12]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+          <mesh castShadow position={[0.17, 0.28, 0]}>
+            <sphereGeometry args={[0.085, 12, 12]} />
+            <meshStandardMaterial color={hex} roughness={0.32} metalness={0.3} />
           </mesh>
-          <mesh castShadow position={[0, 0.42, 0.06]}>
-            <boxGeometry args={[0.12, 0.14, 0.22]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+          <mesh castShadow position={[0.22, 0.3, 0]} rotation={[0, 0, -0.35]}>
+            <coneGeometry args={[0.03, 0.1, 8]} />
+            <meshStandardMaterial color={hex} roughness={0.32} metalness={0.3} />
           </mesh>
-          <mesh castShadow position={[0, 0.53, 0.05]} rotation={[0, Math.PI / 4, 0]}>
-            <coneGeometry args={[0.07, 0.12, 4]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+          {[-0.09, 0.09].map((x) => (
+            <mesh key={x} castShadow position={[x, 0.06, 0.05]}>
+              <boxGeometry args={[0.04, 0.13, 0.04]} />
+              <meshStandardMaterial color={hex} roughness={0.32} metalness={0.3} />
+            </mesh>
+          ))}
+          <mesh castShadow position={[-0.16, 0.22, 0]} rotation={[0, 0, 0.9]}>
+            <capsuleGeometry args={[0.02, 0.12, 3, 8]} />
+            <meshStandardMaterial color={hex} roughness={0.32} metalness={0.3} />
           </mesh>
         </group>
       )
-    case 'robot':
+    case 'boot':
       return (
-        <group>
-          <mesh castShadow position={[0, 0.16, 0]}>
-            <boxGeometry args={[0.2, 0.22, 0.16]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+        <group rotation={[0, Math.PI / 8, 0]}>
+          <mesh castShadow position={[-0.04, 0.18, 0]}>
+            <cylinderGeometry args={[0.1, 0.11, 0.3, 12]} />
+            <meshStandardMaterial color={hex} roughness={0.35} metalness={0.25} />
           </mesh>
-          <mesh castShadow position={[0, 0.36, 0]}>
-            <boxGeometry args={[0.16, 0.13, 0.14]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+          <mesh castShadow position={[0.1, 0.05, 0]}>
+            <boxGeometry args={[0.28, 0.1, 0.16]} />
+            <meshStandardMaterial color={hex} roughness={0.35} metalness={0.25} />
           </mesh>
-          <mesh position={[0, 0.37, 0.08]}>
-            <boxGeometry args={[0.1, 0.04, 0.01]} />
-            <meshStandardMaterial color={light} emissive={light} emissiveIntensity={0.9} />
-          </mesh>
-          <mesh castShadow position={[0, 0.46, 0]}>
-            <cylinderGeometry args={[0.02, 0.02, 0.08, 6]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
-          </mesh>
-          <mesh castShadow position={[0, 0.52, 0]}>
-            <sphereGeometry args={[0.04, 8, 8]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+          <mesh position={[-0.04, 0.05, 0]}>
+            <cylinderGeometry args={[0.105, 0.105, 0.05, 12]} />
+            <meshStandardMaterial color={light} emissive={light} emissiveIntensity={0.35} />
           </mesh>
         </group>
       )
@@ -135,21 +116,25 @@ function TokenShape({ kind, hex, light }: { kind: TokenKind; hex: string; light:
         <group>
           <mesh castShadow position={[0, 0.14, 0]}>
             <capsuleGeometry args={[0.11, 0.16, 4, 10]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.3} />
           </mesh>
           <mesh castShadow position={[0, 0.36, 0.02]}>
             <sphereGeometry args={[0.11, 12, 12]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.3} />
           </mesh>
           {[-1, 1].map((s) => (
             <mesh key={s} castShadow position={[s * 0.07, 0.48, 0]}>
               <coneGeometry args={[0.045, 0.09, 6]} />
-              <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+              <meshStandardMaterial color={hex} roughness={0.28} metalness={0.3} />
             </mesh>
           ))}
           <mesh castShadow position={[0, 0.3, -0.14]} rotation={[0.7, 0, 0]}>
             <capsuleGeometry args={[0.035, 0.16, 3, 8]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.3} />
+          </mesh>
+          <mesh position={[0, 0.36, 0.13]}>
+            <sphereGeometry args={[0.02, 8, 8]} />
+            <meshStandardMaterial color={light} emissive={light} emissiveIntensity={0.5} />
           </mesh>
         </group>
       )
@@ -181,46 +166,38 @@ function TokenShape({ kind, hex, light }: { kind: TokenKind; hex: string; light:
           </mesh>
         </group>
       )
-    case 'wizard':
+    case 'thimble':
       return (
         <group>
-          <mesh castShadow position={[0, 0.14, 0]}>
-            <coneGeometry args={[0.14, 0.28, 10]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+          <mesh castShadow position={[0, 0.2, 0]}>
+            <cylinderGeometry args={[0.1, 0.15, 0.36, 14]} />
+            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.55} />
           </mesh>
-          <mesh castShadow position={[0, 0.34, 0]}>
-            <coneGeometry args={[0.17, 0.1, 10]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+          <mesh castShadow position={[0, 0.38, 0]}>
+            <sphereGeometry args={[0.1, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2]} />
+            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.55} />
           </mesh>
-          <mesh castShadow position={[0, 0.5, 0]}>
-            <coneGeometry args={[0.06, 0.24, 8]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
-          </mesh>
-          <mesh position={[0, 0.33, 0.15]}>
-            <sphereGeometry args={[0.035, 8, 8]} />
-            <meshStandardMaterial color={light} emissive={light} emissiveIntensity={0.8} />
+          <mesh position={[0, 0.34, 0]}>
+            <torusGeometry args={[0.105, 0.012, 8, 16]} />
+            <meshStandardMaterial color={light} emissive={light} emissiveIntensity={0.4} />
           </mesh>
         </group>
       )
-    default: // dragon
+    default: // barrow (wheelbarrow)
       return (
-        <group>
-          <mesh castShadow position={[0, 0.12, 0]}>
-            <capsuleGeometry args={[0.1, 0.14, 4, 10]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+        <group rotation={[0, Math.PI / 6, 0]}>
+          <mesh castShadow position={[0, 0.22, 0]} rotation={[0.2, 0, 0]}>
+            <boxGeometry args={[0.32, 0.18, 0.22]} />
+            <meshStandardMaterial color={hex} roughness={0.38} metalness={0.3} />
           </mesh>
-          <mesh castShadow position={[0, 0.32, 0.05]} rotation={[0.5, 0, 0]}>
-            <capsuleGeometry args={[0.07, 0.12, 3, 8]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+          <mesh castShadow position={[0.2, 0.06, 0]} rotation={[0, 0, Math.PI / 2]}>
+            <cylinderGeometry args={[0.07, 0.07, 0.05, 14]} />
+            <meshStandardMaterial color="#26221e" roughness={0.7} />
           </mesh>
-          <mesh castShadow position={[0, 0.42, 0.12]} rotation={[0.9, 0, 0]}>
-            <coneGeometry args={[0.05, 0.12, 6]} />
-            <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
-          </mesh>
-          {[-1, 1].map((s) => (
-            <mesh key={s} castShadow position={[s * 0.12, 0.22, -0.04]} rotation={[0, 0, s * 0.7]}>
-              <coneGeometry args={[0.06, 0.16, 4]} />
-              <meshStandardMaterial color={hex} roughness={0.28} metalness={0.18} />
+          {[-0.07, 0.07].map((x) => (
+            <mesh key={x} castShadow position={[-0.2, 0.09, x]} rotation={[0, 0, 0.5]}>
+              <cylinderGeometry args={[0.012, 0.012, 0.2, 6]} />
+              <meshStandardMaterial color={hex} roughness={0.45} metalness={0.3} />
             </mesh>
           ))}
         </group>

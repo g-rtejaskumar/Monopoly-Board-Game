@@ -17,6 +17,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { WebSocketServer } from 'ws'
 import type { WebSocket } from 'ws'
 import type { ClientMsg } from '../src/net/protocol'
+import { isTokenId } from '../src/net/protocol'
 import { RoomManager, log, setManagerRef } from './rooms'
 
 // Deploy note (Render and similar hosts): this process must run on a host that
@@ -175,9 +176,12 @@ function isFiniteNumber(v: unknown): v is number {
 function sanitizeClientMsg(msg: ClientMsg): ClientMsg | null {
   switch (msg.t) {
     case 'hello':
+    case 'setName':
       return typeof msg.name === 'string' && NAME_RE.test(msg.name.trim()) ? msg : null
     case 'join':
       return typeof msg.code === 'string' && CODE_RE.test(msg.code.toUpperCase()) ? msg : null
+    case 'selectToken':
+      return isTokenId(msg.token) ? msg : null
     case 'ready':
       return typeof msg.ready === 'boolean' ? msg : null
     case 'build':
@@ -234,6 +238,18 @@ function handle(conn: Conn, raw: ClientMsg): void {
       }
       conn.playerId = res.playerId
       send(conn, { t: 'you', playerId: res.playerId, name })
+      return
+    }
+    case 'setName': {
+      if (!conn.playerId) return
+      const res = manager.setName(conn.playerId, String(msg.name ?? ''))
+      if ('error' in res) send(conn, { t: 'err', code: res.error, message: res.message })
+      return
+    }
+    case 'selectToken': {
+      if (!conn.playerId) return
+      const res = manager.selectToken(conn.playerId, msg.token)
+      if ('error' in res) send(conn, { t: 'err', code: res.error, message: res.message })
       return
     }
     case 'create': {
@@ -368,7 +384,9 @@ function handle(conn: Conn, raw: ClientMsg): void {
     }
     case 'leaveRoom': {
       if (!conn.playerId) return
-      manager.leave(conn.playerId)
+      // An explicit leave is immediate (the seat is forfeited, the room is not
+      // held open for a reconnect). Only a socket drop keeps the grace seat.
+      manager.leave(conn.playerId, true)
       return
     }
     default:

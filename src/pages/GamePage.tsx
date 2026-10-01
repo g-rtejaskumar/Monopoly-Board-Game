@@ -188,6 +188,8 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
   const [chatDraft, setChatDraft] = useState('')
   // --- trade modal ---
   const [tradeOpen, setTradeOpen] = useState(false)
+  // --- manage assets / surrender ---
+  const [manageOpen, setManageOpen] = useState(false)
   useEffect(() => {
     if (!net.net) return
     const off = net.net.onMessage((m) => {
@@ -277,9 +279,11 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
   }, [net, canRoll])
 
   const leave = useCallback(() => {
+    // Explicit leave: the server forfeits the seat and removes membership, so
+    // the player can immediately create or join another room from home.
     net.leaveRoom()
-    navigate('/lobby/' + roomCode)
-  }, [net, navigate, roomCode])
+    navigate('/')
+  }, [net, navigate])
 
   const disconnected = net.status !== 'open'
   const myTurnToBuild =
@@ -378,7 +382,12 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
           >
             <IconPlus />
           </button>
-          <button className="btn btn-icon" aria-label="Settings">
+          <button
+            className="btn btn-icon"
+            aria-label="Manage assets"
+            title="Manage assets and game options"
+            onClick={() => setManageOpen(true)}
+          >
             <IconGear />
           </button>
           <button className="btn" onClick={leave}>
@@ -503,7 +512,15 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
             />
           )}
 
-          {game.winner && <WinnerScreen game={game} youId={net.youId} onPlayAgain={() => net.playAgain()} />}
+          {game.winner && (
+            <WinnerScreen
+              game={game}
+              youId={net.youId}
+              isHost={net.room?.hostId === net.youId}
+              onPlayAgain={() => net.playAgain()}
+              onLeave={leave}
+            />
+          )}
         </div>
 
         {/* ---------------- right: info sidebar ---------------- */}
@@ -813,6 +830,18 @@ function NetGame({ roomCode, game }: { roomCode: string; game: GameSnapshot }) {
           onAccept={() => net.tradeRespond(true)}
           onReject={() => net.tradeRespond(false)}
           onCancel={() => net.tradeCancel()}
+        />
+      )}
+
+      {manageOpen && !game.winner && (
+        <ManageAssetsModal
+          game={game}
+          youId={net.youId}
+          onClose={() => setManageOpen(false)}
+          onSurrender={() => {
+            net.declareBankrupt()
+            setManageOpen(false)
+          }}
         />
       )}
     </div>
@@ -1963,11 +1992,15 @@ function DebtPanel({
 function WinnerScreen({
   game,
   youId,
+  isHost,
   onPlayAgain,
+  onLeave,
 }: {
   game: GameSnapshot
   youId: string | null
+  isHost: boolean
   onPlayAgain: () => void
+  onLeave: () => void
 }) {
   const winner = game.players.find((p) => p.id === game.winner)
   if (!winner) return null
@@ -1997,11 +2030,92 @@ function WinnerScreen({
             </div>
           ))}
         </div>
-        <div className="modal-actions">
-          <button className="btn btn-primary" onClick={onPlayAgain}>
-            Play again
+        <div className="modal-actions winner-actions">
+          {isHost ? (
+            <button className="btn btn-primary" onClick={onPlayAgain}>
+              Play again
+            </button>
+          ) : (
+            <p className="winner-hint">Waiting for the host to start another game…</p>
+          )}
+          <button className="btn" onClick={onLeave}>
+            <IconArrowLeft /> Back to home
           </button>
         </div>
+      </section>
+    </div>
+  )
+}
+
+/* ---------------------------- manage assets -------------------------------- */
+
+/**
+ * Manage Assets / game options. Hosts the voluntary surrender control, which
+ * requires an explicit confirmation because it eliminates the player for the
+ * rest of the game. The server performs the elimination and asset transfer.
+ */
+function ManageAssetsModal({
+  game,
+  youId,
+  onClose,
+  onSurrender,
+}: {
+  game: GameSnapshot
+  youId: string | null
+  onClose: () => void
+  onSurrender: () => void
+}) {
+  const [confirming, setConfirming] = useState(false)
+  const myTiles = propOfLocal(game, youId)
+  const me = game.players.find((p) => p.id === youId)
+  return (
+    <div className="modal-wrap" onClick={onClose}>
+      <section className="modal manage-modal" onClick={(e) => e.stopPropagation()}>
+        <h3>Manage assets</h3>
+        <p className="deed-note">Cash: M {(me?.cash ?? 0).toLocaleString()}</p>
+        <div className="debt-assets">
+          {myTiles.length === 0 && <p className="deed-note">You don't own any deeds yet.</p>}
+          {myTiles.map((idx) => {
+            const t = getTile(idx)
+            const b = game.buildings[String(idx)] ?? 0
+            const mortgaged = Boolean(game.mortgaged[String(idx)])
+            return (
+              <div key={idx} className="debt-asset">
+                <span className="debt-asset-name">
+                  {t?.name ?? `Tile ${idx}`}
+                  {b > 0 ? ` (${b >= 5 ? 'hotel' : `${b} house${b > 1 ? 's' : ''}`})` : ''}
+                  {mortgaged ? ' · mortgaged' : ''}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+
+        {!confirming ? (
+          <div className="modal-actions">
+            <button className="btn" onClick={onClose}>
+              Close
+            </button>
+            <button className="btn btn-danger" onClick={() => setConfirming(true)}>
+              Declare bankruptcy…
+            </button>
+          </div>
+        ) : (
+          <div className="manage-confirm" role="alertdialog" aria-label="Confirm bankruptcy">
+            <p className="error-text">
+              This eliminates you from the game. Your cash and deeds are returned to the bank (or paid
+              to a creditor if you owe them). This cannot be undone.
+            </p>
+            <div className="modal-actions">
+              <button className="btn" onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+              <button className="btn btn-danger" onClick={onSurrender}>
+                Yes, surrender
+              </button>
+            </div>
+          </div>
+        )}
       </section>
     </div>
   )

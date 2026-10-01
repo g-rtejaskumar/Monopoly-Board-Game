@@ -845,6 +845,102 @@ async function main(): Promise<void> {
     sweepJanitor()
   }
 
+  /* ------------- names, tokens, bankruptcy, winner, room reuse ------------- */
+  {
+    const h = new TestClient('feat-host')
+    const g = new TestClient('feat-guest')
+    janitor.push(h, g)
+    await h.open()
+    await g.open()
+
+    h.send({ t: 'hello', name: 'Temp' })
+    await h.waitFor((m) => m.t === 'you', 5000)
+    h.send({ t: 'setName', name: 'Hosty McHost' })
+    await h.waitFor((m) => m.t === 'you' && m.name === 'Hosty McHost', 5000)
+    h.send({ t: 'create' })
+    const created = await h.waitFor((m) => m.t === 'created', 5000)
+    const code = created.t === 'created' ? created.code : ''
+    check('setName updates the host display name', created.t === 'created' && created.you.name === 'Hosty McHost')
+
+    g.send({ t: 'hello', name: 'Guesty' })
+    await g.waitFor((m) => m.t === 'you', 5000)
+    g.send({ t: 'join', code })
+    const joined = await g.waitFor((m) => m.t === 'joined', 5000)
+    check('guest custom name is stored and broadcast', joined.t === 'joined' && joined.you.name === 'Guesty')
+    check(
+      'host and guest receive distinct default tokens',
+      joined.t === 'joined' && created.t === 'created' && joined.you.token !== created.you.token,
+    )
+
+    // Token change → syncs to the other client; duplicates are rejected.
+    g.send({ t: 'selectToken', token: 'cat' })
+    const syncRoom = await h
+      .waitFor((m) => m.t === 'room' && m.room.players.some((p) => p.token === 'cat'), 5000)
+      .catch(() => null)
+    check('token selection synchronizes to other clients', syncRoom?.t === 'room')
+    h.send({ t: 'selectToken', token: 'cat' })
+    const dup = await h.waitFor((m) => m.t === 'err' && m.code === 'tokenTaken', 5000).catch(() => null)
+    check('a token already taken cannot be selected', dup?.t === 'err')
+
+    // Start → tokens lock and carry onto the board.
+    g.send({ t: 'ready', ready: true })
+    h.send({ t: 'start' })
+    const started = await h.waitFor((m) => m.t === 'started', 6000).catch(() => null)
+    check('game starts with two players', started?.t === 'started' && started.game.players.length === 2)
+    check(
+      'selected tokens are carried into the game',
+      started?.t === 'started' && started.game.players.some((p) => p.token === 'cat'),
+    )
+    h.send({ t: 'selectToken', token: 'hat' })
+    const locked = await h.waitFor((m) => m.t === 'err' && m.code === 'tokenLocked', 5000).catch(() => null)
+    check('token changes are rejected after the game starts', locked?.t === 'err')
+
+    // Voluntary bankruptcy from an idle turn ends a two-player game.
+    h.send({ t: 'declareBankrupt' })
+    const winG = await g.waitFor((m) => m.t === 'state' && m.game.winner === g.playerId, 6000).catch(() => null)
+    const winH = await h.waitFor((m) => m.t === 'state' && m.game.winner === g.playerId, 6000).catch(() => null)
+    check(
+      'voluntary bankruptcy eliminates the player and ends the game',
+      winG?.t === 'state' && winG.game.players.find((p) => p.id === h.playerId)?.bankrupt === true,
+    )
+    check('both clients agree on the same winner', winH?.t === 'state')
+
+    const turnBefore = g.lastGame()?.turn
+    g.send({ t: 'roll' })
+    await sleep(400)
+    check('no gameplay actions are accepted after the game ends', g.lastGame()?.turn === turnBefore)
+
+    // Room reuse: leave a finished game and create a brand-new room.
+    h.send({ t: 'leaveRoom' })
+    await sleep(250)
+    h.send({ t: 'create' })
+    const created2 = await h.waitFor((m) => m.t === 'created' && m.code !== code, 5000).catch(() => null)
+    const createErr = h.inbox.filter((m) => m.t === 'err').at(-1)
+    check(
+      'the host can create a fresh room after a finished game',
+      created2?.t === 'created',
+      createErr?.t === 'err' ? `err=${createErr.code}:${createErr.message}` : 'no created message',
+    )
+
+    // A different player can join that new room (no stale "Already in room").
+    g.send({ t: 'leaveRoom' })
+    await sleep(250)
+    const joiner = new TestClient('feat-joiner')
+    janitor.push(joiner)
+    await joiner.open()
+    joiner.send({ t: 'hello', name: 'Joiner' })
+    await joiner.waitFor((m) => m.t === 'you', 5000)
+    joiner.send({ t: 'join', code: created2?.t === 'created' ? created2.code : 'ZZZZZZ' })
+    const joined2 = await joiner.waitFor((m) => m.t === 'joined' || m.t === 'err', 5000).catch(() => null)
+    check(
+      'a player can join a different room after leaving the previous one',
+      joined2?.t === 'joined',
+      joined2?.t === 'err' ? `err=${joined2.code}:${joined2.message}` : 'no reply',
+    )
+
+    sweepJanitor()
+  }
+
   /* ---------------- cleanup ---------------- */
   sweepJanitor()
   mal.close()
